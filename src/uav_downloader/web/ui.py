@@ -739,7 +739,7 @@ function renderLibChips() {
     chips.append(b);
   };
   add("全部", "all", "");
-  for (const name of libFolders) if (name !== "01-日本JAV") add(name, "folder", name);
+  for (const name of libFolders) add(name, "folder", name);
   chips.classList.toggle("clamped", !libChipsOpen);
   requestAnimationFrame(() => { $("libChipsToggle").hidden = chips.scrollHeight <= 90; });
   $("libChipsToggle").textContent = libChipsOpen ? "收起" : "展开";
