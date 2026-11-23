@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 """Localization strings for the GUI apps."""
+import os
 
 LANGUAGES = [
     ('en', 'English'), ('th', 'ไทย'), ('zh', '繁體中文'),
@@ -1929,6 +1930,13 @@ STATE_LABELS = {
 
 # Active language - set before GUI init
 _current_lang = 'en'
+
+# [fork] Headless contexts (Docker CLI / Web queue) have no GUI language
+# picker; allow presetting the language via environment, e.g. UAV_LANG=zh-Hans.
+# Site title languages follow this setting (see sites/*_lang mappings).
+_env_lang = os.environ.get('UAV_LANG', '').strip()
+if _env_lang in STRINGS:
+    _current_lang = _env_lang
 
 
 def set_lang(lang: str):

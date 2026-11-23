@@ -18,7 +18,8 @@ COPY . .
 ENV DOWNLOAD_DIR=/downloads \
     UAV_WEB_STATE_DIR=/state \
     PYTHONPATH=/app/src \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    UAV_LANG=zh-Hans
 VOLUME ["/downloads"]
 EXPOSE 8765
 
