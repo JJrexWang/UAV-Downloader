@@ -16,6 +16,8 @@ VIDEO_EXTS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.ts', '.m2ts'}
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.webp')
 CODE_RE = re.compile(r'[A-Za-z]{2,6}-?\d{2,5}')
 _CODE_PARTS = re.compile(r'([A-Za-z]{2,6})-?(\d{2,5})')
+_RANK_PREFIX = re.compile(r'^\d{1,4}-')
+_COPY_SUFFIX = re.compile(r'-\d{1,3}$')
 _FOLDER_TITLE_RE = re.compile(r'^\[[^\]]+\]\s*(.*)$')
 TOP_JAV = '01-日本JAV'
 BUCKETS = {'共演·合集', 'FC2', '素人'}
@@ -40,6 +42,19 @@ def _normalize_code(raw):
     return f'{match.group(1).upper()}-{match.group(2)}'
 
 
+def clean_actress_name(name):
+    """Display name for an actress directory: drop rank/copy numbering.
+
+    Library actress folders carry a ranking prefix (``264-楓富愛``) and
+    sometimes a copy suffix (``032-目黑恵美-01``); both are filing
+    artefacts, not part of the name.  Anything else is returned unchanged.
+    """
+    text = (name or '').strip()
+    text = _RANK_PREFIX.sub('', text)
+    text = _COPY_SUFFIX.sub('', text)
+    return text.strip()
+
+
 def extract_code(text):
     """First video code in *text*, normalised to ``UPPER-NNN`` form."""
     if not text:
@@ -60,13 +75,17 @@ def _parse_work(root, path):
     if not title:
         title = CODE_RE.sub('', path.stem, count=1).strip(' -_') if code else path.stem
     actress = ''
+    actress_dir = ''
     folder = parts[0] if len(parts) >= 2 else ''
     if folder == TOP_JAV and len(parts) >= 3:
         segment = parts[1]
         if segment in BUCKETS:
             folder = segment
         else:
-            actress = segment
+            actress_dir = segment
+            actress = clean_actress_name(segment)
+    # Cover: an image in the video's own directory whose stem equals the
+    # video's stem (any category, folder layout or loose file alike).
     cover = ''
     for ext in IMAGE_EXTS:
         candidate = path.with_suffix(ext)
@@ -78,7 +97,8 @@ def _parse_work(root, path):
     except OSError:
         size = 0
     return {'rel': rel, 'size': size, 'code': code, 'title': title,
-            'actress': actress, 'folder': folder, 'cover': cover}
+            'actress': actress, 'actress_dir': actress_dir, 'folder': folder,
+            'cover': cover, 'cover_rel': cover}
 
 
 def _scan():
@@ -129,6 +149,14 @@ def scan_library():
         _cache['works'] = works
         _cache['at'] = time.time()
     return list(works)
+
+
+def invalidate_cache():
+    """Drop the scan caches (e.g. after a backfill filing changed the tree)."""
+    with _lock:
+        _cache['works'] = None
+        _cache['dl_codes'] = None
+        _cache['at'] = 0.0
 
 
 def code_index():

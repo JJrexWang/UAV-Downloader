@@ -91,8 +91,10 @@ def library_actresses():
     grouped = {}
     for work in library.scan_library():
         if work.get('folder') == library.TOP_JAV and work.get('actress'):
-            entry = grouped.setdefault(work['actress'],
-                                       {'name_cn': work['actress'], 'codes': []})
+            name = library.clean_actress_name(work['actress'])
+            if not name:
+                continue
+            entry = grouped.setdefault(name, {'name_cn': name, 'codes': []})
             if work['code'] and work['code'] not in entry['codes']:
                 entry['codes'].append(work['code'])
     actresses = []

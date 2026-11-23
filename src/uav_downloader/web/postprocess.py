@@ -67,8 +67,14 @@ def _folder_title(title):
     return title
 
 
-def build_plan(src_path, downloads_root):
-    """One plan dict for a finished video file, or None if unidentifiable."""
+def build_plan(src_path, downloads_root, intent=None):
+    """One plan dict for a finished video file, or None if unidentifiable.
+
+    With *intent* (a backfill record), the destination is forced: the file
+    goes flat into ``intent['target_dir']`` under a name rebuilt from the
+    intent's actress/title with this file's real extension and part suffix
+    (identical to ``intent['target_name']`` for a plain .mp4).
+    """
     src_path = Path(src_path)
     code = library.extract_code(src_path.stem)
     if not code:
@@ -108,7 +114,7 @@ def build_plan(src_path, downloads_root):
         src_rel = src_path.relative_to(Path(downloads_root)).as_posix()
     except ValueError:
         src_rel = src_path.name
-    return {
+    plan = {
         'id': uuid.uuid4().hex[:12],
         'ts': int(time.time()),
         'src_name': src_path.name,
@@ -124,6 +130,45 @@ def build_plan(src_path, downloads_root):
         'status': 'pending',
         'reason': reason,
     }
+    if intent:
+        plan['actress_cn'] = intent.get('actress_cn') or actress_cn
+        plan['actress_jp'] = intent.get('actress_jp') or actress_jp
+        plan['title'] = intent.get('title') or title
+        plan['target_rel'] = intent['target_dir']
+        plan['new_name'] = naming.build_name(
+            code, plan['actress_cn'], plan['actress_jp'], plan['title'],
+            ext, suffix)
+        plan['reason'] = ''
+        plan['backfill'] = True
+    return plan
+
+
+def file_with_intent(src_path, downloads_root, intent):
+    """Build a forced-target plan for one file and execute it immediately.
+
+    Returns the final plan dict (status done/conflict/error), or None when
+    no plan could be built.  Used by the backfill completion hook, which
+    files confirmed downloads regardless of the file_mode setting.
+    """
+    plan = build_plan(src_path, downloads_root, intent=intent)
+    if not plan:
+        return None
+    with _lock:
+        plans = load_plans()
+        plans.append(plan)
+        _save_plans(plans)
+    execute([plan['id']])
+    for saved in load_plans():
+        if saved['id'] == plan['id']:
+            return saved
+    return plan
+
+
+def discard_plan(plan_id):
+    """Remove one plan entirely (backfill fallback housekeeping)."""
+    with _lock:
+        plans = [p for p in load_plans() if p.get('id') != plan_id]
+        _save_plans(plans)
 
 
 def plan_for_completed_job(job, downloads_root):

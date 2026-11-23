@@ -7,7 +7,8 @@ import threading
 from urllib.parse import parse_qs, urlsplit
 
 from uav_downloader.core.storage import StorageWriteError
-from . import actress, auth, library, organize, postprocess, searchsvc
+from . import actress, auth, backfill, library, metadata, organize
+from . import postprocess, searchsvc
 from .ui import HTML, CSS, JS
 
 
@@ -43,6 +44,68 @@ QUERY_GET_PATHS = {'/api/search', '/api/library', '/api/settings',
 # While an account still has must_change set, only these paths stay usable:
 # the forced password-change flow and its escape hatch.
 MUST_CHANGE_ALLOWED = {'/api/me', '/api/change-password', '/api/logout'}
+
+
+def _enrich_jobs(jobs):
+    """Add ``code``/``actress`` display fields to queue job dicts.
+
+    Best-effort and offline only: backfill intents by job id, then existing
+    postprocess plans by code, then the metadata cache (never a network
+    lookup).  Unknown actresses stay ''.  Mutates and returns *jobs*.
+    """
+    try:
+        intents = backfill.load_intents()
+    except Exception:
+        intents = {}
+    plan_by_code = {}
+    try:
+        for plan in postprocess.load_plans():
+            if plan.get('code') and plan.get('actress_cn'):
+                plan_by_code.setdefault(plan['code'], plan['actress_cn'])
+    except Exception:
+        pass
+    for job in jobs or []:
+        url = job.get('url', '')
+        tail = url.rstrip('/').rsplit('/', 1)[-1]
+        job['code'] = library.extract_code(tail) or library.extract_code(url)
+        actress = ''
+        intent = intents.get(job.get('id') or '')
+        if intent:
+            actress = intent.get('actress_cn') or ''
+        if not actress and job['code']:
+            actress = plan_by_code.get(job['code'], '')
+        if not actress and job['code']:
+            try:
+                cached = metadata.cached_lookup(job['code'])
+            except Exception:
+                cached = None
+            if cached:
+                actress = cached.get('actress_cn') or ''
+        job['actress'] = actress
+    return jobs
+
+
+def _enrich_snapshot(snapshot):
+    _enrich_jobs((snapshot or {}).get('jobs'))
+    return snapshot
+
+
+def _backfill_items(data):
+    """Validate the ``items`` field of a backfill request body."""
+    items = data.get('items')
+    if not isinstance(items, list) or not 1 <= len(items) <= 100:
+        raise ValueError('items must be a list of 1..100 entries')
+    out = []
+    for item in items:
+        if (not isinstance(item, dict)
+                or not set(item) <= {'url', 'code', 'title'}
+                or any(not isinstance(item.get(key, ''), str)
+                       for key in ('url', 'code', 'title'))
+                or not item.get('url')):
+            raise ValueError('Invalid backfill item')
+        out.append({'url': item.get('url', ''), 'code': item.get('code', ''),
+                    'title': item.get('title', '')})
+    return out
 
 
 class BoundedServer(ThreadingHTTPServer):
@@ -449,7 +512,10 @@ def make_server(host, port, queue, allowed_hosts=None):
                 else:
                     self._send(200, *static[self.path])
             elif self.path == '/api/queue' and self._auth():
-                self._send(200, queue.snapshot())
+                self._send(200, _enrich_snapshot(queue.snapshot()))
+            elif self.path == '/api/backfill':
+                if self._auth():
+                    self._send(200, {'intents': backfill.load_intents()})
             elif self.path == '/api/me':
                 if self._auth():
                     self._send(200, self.current_user)
@@ -511,7 +577,21 @@ def make_server(host, port, queue, allowed_hosts=None):
                 if self.path == '/api/queue':
                     if set(data) != {'jobs'}:
                         raise ValueError('Expected only jobs')
-                    self._send(201, {'jobs': queue.add(data['jobs'])})
+                    self._send(201, {'jobs': _enrich_jobs(queue.add(data['jobs']))})
+                    return
+                if self.path == '/api/backfill/plan':
+                    if not set(data) <= {'items', 'actress_hint'}:
+                        raise ValueError('Expected items and optional actress_hint')
+                    hint = data.get('actress_hint')
+                    if hint is not None and not isinstance(hint, str):
+                        raise ValueError('actress_hint must be a string')
+                    self._send(200, backfill.plan(
+                        _backfill_items(data), hint, queue.snapshot()))
+                    return
+                if self.path == '/api/backfill/start':
+                    if set(data) != {'items'}:
+                        raise ValueError('Expected only items')
+                    self._send(200, backfill.start(_backfill_items(data), queue))
                     return
                 if self.path == '/api/settings':
                     self._send(200, save_settings(data))
@@ -552,7 +632,7 @@ def make_server(host, port, queue, allowed_hosts=None):
                 else:
                     self._send(404, {'error': 'Not found'})
                     return
-                self._send(200, queue.snapshot())
+                self._send(200, _enrich_snapshot(queue.snapshot()))
             except KeyError:
                 self._send(404, {'error': 'Job not found'})
             except StorageWriteError:

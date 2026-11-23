@@ -291,13 +291,33 @@ class QueueManager:
             # --- Phase 2 postprocess hook: build rename/filing plans for a
             # successfully finished job.  Fully isolated: it must never
             # affect the job's status, the queue, or this worker loop. ---
+            # --- Phase 5 backfill: a job with a filing intent is moved
+            # straight into its confirmed target; only when that does not
+            # happen does the normal preview-plan flow run. ---
             if status == 'completed':
+                filed = False
                 try:
-                    from . import postprocess
-                    postprocess.plan_for_completed_job(copy.deepcopy(job), self.root)
+                    from . import backfill
+                    filed = backfill.handle_completed_job(
+                        copy.deepcopy(job), self.root)
                 except Exception:
-                    pass
-            # --- end Phase 2 postprocess hook ---
+                    filed = False
+                if not filed:
+                    try:
+                        from . import postprocess
+                        postprocess.plan_for_completed_job(
+                            copy.deepcopy(job), self.root)
+                    except Exception:
+                        pass
+                    try:
+                        from . import backfill
+                        if backfill.intent_for(job['id']):
+                            job['logs'] = (job['logs'] + [
+                                'backfill filing failed; file left in downloads'
+                            ])[-30:]
+                    except Exception:
+                        pass
+            # --- end postprocess/backfill hooks ---
             with self._condition:
                 self._active = None
                 if not storage_failed and self._cancel.is_set():

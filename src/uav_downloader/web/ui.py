@@ -78,6 +78,7 @@ HTML = '''<!doctype html>
           <button id="searchBtn" class="primary">搜索</button>
         </div>
         <p id="searchStatus" class="meta"></p>
+        <div class="row" id="backfillRow" hidden><button id="backfillBtn" class="primary">一键补充入库</button><span class="meta">把本页不在库的作品下载并归入对应女优文件夹（按规范改名）</span></div>
         <div id="results" class="grid"></div>
       </div>
       <div class="card">
@@ -94,24 +95,42 @@ HTML = '''<!doctype html>
     </section>
     <section id="view-library" class="view" hidden>
       <div class="section-head"><h2>我的片库</h2><button id="libRefresh">刷新</button></div>
+      <div class="picker" id="actPicker">
+        <div class="row">
+          <input id="libActSearch" type="search" placeholder="输入女优名筛选…" autocomplete="off">
+          <button id="libActAll">全部女优</button>
+        </div>
+        <div id="libActSel"></div>
+        <div id="libActList" class="picker-list" hidden></div>
+      </div>
       <div class="chips" id="libChips"></div>
-      <div id="libGrid" class="grid"></div>
+      <button id="libChipsToggle" class="ghost chips-toggle" hidden>展开</button>
+      <div id="libGrid" class="grid lib-grid"></div>
     </section>
     <section id="view-queue" class="view" hidden>
       <div class="section-head"><h2>下载管理</h2><button id="clear">清除已结束记录</button></div>
       <div id="halted" class="warn" hidden><p>存储错误：队列已停止。确认磁盘健康与空间后再继续。</p><button id="resume" class="primary">已检查磁盘，继续队列</button></div>
-      <div id="jobs"></div>
+      <div id="queueGroups"></div>
+      <div id="queueDetail" hidden>
+        <div class="row qd-head">
+          <button id="queueBack">← 返回</button>
+          <h3 id="queueDetailTitle"></h3>
+          <span id="queueDetailMeta" class="meta"></span>
+        </div>
+        <div id="jobs"></div>
+      </div>
     </section>
     <section id="view-actress" class="view" hidden>
       <h2>女优缺片</h2>
       <div class="card">
-        <div class="chips" id="actChips"></div>
+        <div id="actList" class="act-grid"></div>
         <div class="row wrap" style="margin-top:14px">
           <input id="actName" type="search" placeholder="输入女优名（中文 / 日文 / 繁体）…" autocomplete="off">
           <button id="actQuery" class="primary">查询缺片</button>
         </div>
         <p id="actStatus" class="meta"></p>
         <p id="actOwned" class="meta"></p>
+        <div id="actOwnedGrid" class="chips"></div>
       </div>
       <div id="actGrid" class="grid"></div>
       <div id="actBar" class="sticky-bar" hidden>
@@ -205,6 +224,20 @@ HTML = '''<!doctype html>
     <div class="pl-head"><span id="plTitle"></span><button id="plClose" class="icon-btn" aria-label="关闭">✕</button></div>
     <video id="plVideo" controls playsinline></video>
     <p id="plInfo" class="meta"></p>
+  </div>
+</div>
+<div id="bfModal" hidden>
+  <div class="pl-backdrop" id="bfBackdrop"></div>
+  <div class="pl-box bf-box">
+    <div class="pl-head"><span>补充入库确认</span><button id="bfClose" class="icon-btn" aria-label="关闭">✕</button></div>
+    <p id="bfSummary" class="meta"></p>
+    <p id="bfCounts" class="meta"></p>
+    <div id="bfList" class="bf-list"></div>
+    <p id="bfError" class="notice"></p>
+    <div class="row bf-actions">
+      <button id="bfCancel" class="ghost">取消</button>
+      <button id="bfConfirm" class="primary" disabled>确认下载 0 部</button>
+    </div>
   </div>
 </div>
 <div id="toast" role="status" aria-live="polite"></div>
@@ -337,6 +370,44 @@ details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospa
 .log-row.done{color:var(--dim)}
 #toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);background:var(--s3);color:var(--on);border:1px solid var(--line);padding:11px 20px;border-radius:999px;font-size:14px;opacity:0;pointer-events:none;transition:.2s;z-index:80;max-width:92vw;text-align:center}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#content.wide{max-width:none}
+.lib-grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+#backfillRow{margin-top:10px}
+.picker{position:relative;margin-bottom:12px}
+.picker .row input[type="search"]{flex:1;min-width:200px}
+#libActSel{margin-top:10px}
+#libActSel:empty{margin-top:0}
+.sel-chip{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:7px 8px 7px 14px;background:var(--pri);color:var(--onpri);border:1px solid var(--pri);font-size:13px;font-weight:600}
+.sel-chip button{background:rgba(0,0,0,.18);border:0;color:inherit;border-radius:50%;width:20px;height:20px;padding:0;display:flex;align-items:center;justify-content:center;font-size:12px}
+.picker-list{position:absolute;left:0;right:0;top:100%;margin-top:6px;background:var(--s2);border:1px solid var(--line);border-radius:10px;max-height:264px;overflow:auto;z-index:30;box-shadow:0 10px 30px rgba(0,0,0,.4)}
+.picker-item{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;text-align:left;background:transparent;border:0;border-bottom:1px solid var(--line);border-radius:0;padding:10px 14px;font-weight:600}
+.picker-item:last-child{border-bottom:0}
+.picker-item:hover{background:var(--s3)}
+.picker-item .cnt{color:var(--dim);font-size:12px;font-weight:400;flex:none}
+.picker-empty{padding:12px 14px;color:var(--dim);font-size:13px}
+#libChips.clamped{max-height:86px;overflow:hidden}
+.chips-toggle{margin-top:8px;padding:6px 12px;font-size:13px}
+.qgroup{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:14px;cursor:pointer}
+.qgroup:hover{border-color:var(--s4);background:var(--s1)}
+.qgroup progress{margin:12px 0 0}
+.qgroup .chev{color:var(--dim);font-size:22px;flex:none;line-height:1}
+.qd-head{margin-bottom:14px}
+.qd-head h3{margin:0}
+.act-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+.act-cell{display:flex;align-items:center;gap:10px;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+.act-cell-name{flex:1;min-width:0;font-weight:700;overflow-wrap:anywhere}
+.act-cell-count{color:var(--dim);font-size:12px;flex:none}
+.act-cell button{flex:none;padding:7px 12px;font-size:13px}
+#bfModal{position:fixed;inset:0;z-index:70;display:flex;align-items:center;justify-content:center}
+.bf-box{width:min(760px,94vw)}
+.bf-list{max-height:44vh;overflow:auto;display:flex;flex-direction:column;gap:8px;margin:12px 0}
+.bf-row{display:flex;gap:10px;align-items:flex-start;background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:10px 12px;cursor:pointer}
+.bf-row input[type="checkbox"]{width:18px;height:18px;flex:none;margin-top:2px;accent-color:var(--pri)}
+.bf-main{flex:1;min-width:0}
+.bf-line{font-size:14px;overflow-wrap:anywhere}
+.bf-code{font-weight:800;margin-right:8px}
+.bf-target{color:var(--dim);font-size:12px;overflow-wrap:anywhere;margin-top:2px}
+.bf-actions{justify-content:flex-end;margin-top:8px}
 @media(max-width:760px){
   #app{flex-direction:column}
   #sidebar{width:100%;height:auto;position:fixed;left:0;right:0;bottom:0;top:auto;z-index:50;border-right:0;border-top:1px solid var(--line);padding:6px 8px calc(6px + env(safe-area-inset-bottom))}
@@ -354,7 +425,9 @@ details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospa
 JS = r'''"use strict";
 let sessionToken = "", session = 0, timer = null, readSeq = 0, busy = false, ppTimer = null;
 let me = null, loginPassword = "";  // loginPassword only bridges login -> forced change; cleared right after.
-let site = "jable", lastResults = [], libLoaded = false, libFilter = {type: "all", value: ""};
+let site = "jable", lastResults = [], lastQuery = "", libLoaded = false, libFilter = {type: "all", value: ""};
+let queueActress = null, queueData = null;  // queueActress: null = group list, "" = 未分类 group, else actress name
+let bfPlan = null, bfSel = new Set(), bfBusy = false;
 let settings = {auto_rename: true, file_mode: "preview", lang: "zh-Hans"};
 const $ = id => document.getElementById(id);
 const STATUS = {pending: "等待中", running: "下载中", cancelling: "正在取消", completed: "完成", failed: "失败", cancelled: "已取消", interrupted: "中断，请重试"};
@@ -378,6 +451,7 @@ function toGate(notice) {
   session++; readSeq++; sessionToken = ""; me = null; loginPassword = "";
   clearTimeout(timer); clearInterval(ppTimer);
   $("app").hidden = true; $("forceChange").hidden = true; $("onboard").hidden = true;
+  $("bfModal").hidden = true; bfPlan = null; bfSel = new Set(); bfBusy = false; queueActress = null; queueData = null;
   $("auth").hidden = false; $("loginBtn").disabled = false;
   $("authNotice").textContent = notice || "";
   closePlayer(); libLoaded = false; actLoaded = false;
@@ -410,6 +484,7 @@ async function enterApp() {
 function showView(name) {
   for (const item of document.querySelectorAll(".nav-item")) item.classList.toggle("active", item.dataset.view === name);
   for (const view of document.querySelectorAll(".view")) view.hidden = view.id !== "view-" + name;
+  $("content").classList.toggle("wide", name === "library" || name === "actress");
   if (name === "library" && !libLoaded) loadLibrary();
   if (name === "actress" && !actLoaded) loadActresses();
   if (name === "settings") loadSettings();
@@ -419,36 +494,93 @@ function showView(name) {
   if (name === "organize") loadOrgState();
 }
 /* ---------------- queue ---------------- */
+const ACTIVE_STATUS = ["pending", "running", "cancelling"];
+function jobCard(job) {
+  const card = node("article", undefined, "job");
+  const head = node("div", undefined, "job-head");
+  head.append(node("p", job.url, "job-url"), node("span", STATUS[job.status] || job.status, "status " + job.status));
+  card.append(head);
+  const progress = node("progress"); progress.max = job.total || 1;
+  if (job.total) progress.value = Math.min(job.done, job.total);
+  else if (job.status !== "running") progress.value = job.status === "completed" ? 1 : 0;
+  card.append(progress);
+  const count = job.total ? Math.floor(job.done) + " / " + Math.floor(job.total) + " " + job.unit : "等待来源或进度";
+  card.append(node("p", count + " · " + (job.speed_bps / 1048576).toFixed(2) + " MiB/s · " + job.resolution, "meta"));
+  const actions = node("div", undefined, "actions");
+  if (["pending", "running"].includes(job.status)) { const b = node("button", "取消"); b.onclick = () => queueAction("/api/cancel", {id: job.id}); actions.append(b); }
+  if (["failed", "cancelled", "interrupted", "completed"].includes(job.status)) { const b = node("button", "重试"); b.onclick = () => queueAction("/api/retry", {id: job.id}); actions.append(b); }
+  if (actions.childNodes.length) card.append(actions);
+  const details = node("details"); details.append(node("summary", "事件记录"), node("pre", (job.logs || []).join("\n")));
+  card.append(details);
+  return card;
+}
+function jobPercent(job) {
+  if (job.status === "completed") return 100;
+  return job.total ? Math.min(100, job.done / job.total * 100) : 0;
+}
+function groupCounts(jobs) {
+  return {total: jobs.length,
+          done: jobs.filter(j => j.status === "completed").length,
+          active: jobs.filter(j => ACTIVE_STATUS.includes(j.status)).length};
+}
+function countsText(jobs) {
+  const c = groupCounts(jobs);
+  return "共 " + c.total + " 部 · 完成 " + c.done + " · 进行 " + c.active;
+}
 function renderQueue(data) {
-  const active = data.jobs.filter(j => ["pending", "running", "cancelling"].includes(j.status)).length;
+  queueData = data;
+  const active = data.jobs.filter(j => ACTIVE_STATUS.includes(j.status)).length;
   const badge = $("queueBadge"); badge.hidden = active === 0; badge.textContent = active;
   $("halted").hidden = !data.halted;
-  const container = $("jobs"); const fragment = document.createDocumentFragment();
-  if (!data.jobs.length) {
-    const empty = node("div", undefined, "empty");
-    empty.append(node("div", "队", "empty-icon"), node("h3", "队列是空的"), node("p", "在搜索页粘贴视频网址，或从搜索结果一键加入。"));
-    fragment.append(empty);
-  }
+  // Group jobs by actress ("" = 未分类）.
+  const groups = new Map();
   for (const job of data.jobs) {
-    const card = node("article", undefined, "job");
-    const head = node("div", undefined, "job-head");
-    head.append(node("p", job.url, "job-url"), node("span", STATUS[job.status] || job.status, "status " + job.status));
-    card.append(head);
-    const progress = node("progress"); progress.max = job.total || 1;
-    if (job.total) progress.value = Math.min(job.done, job.total);
-    else if (job.status !== "running") progress.value = job.status === "completed" ? 1 : 0;
-    card.append(progress);
-    const count = job.total ? Math.floor(job.done) + " / " + Math.floor(job.total) + " " + job.unit : "等待来源或进度";
-    card.append(node("p", count + " · " + (job.speed_bps / 1048576).toFixed(2) + " MiB/s · " + job.resolution, "meta"));
-    const actions = node("div", undefined, "actions");
-    if (["pending", "running"].includes(job.status)) { const b = node("button", "取消"); b.onclick = () => queueAction("/api/cancel", {id: job.id}); actions.append(b); }
-    if (["failed", "cancelled", "interrupted", "completed"].includes(job.status)) { const b = node("button", "重试"); b.onclick = () => queueAction("/api/retry", {id: job.id}); actions.append(b); }
-    if (actions.childNodes.length) card.append(actions);
-    const details = node("details"); details.append(node("summary", "事件记录"), node("pre", (job.logs || []).join("\n")));
-    card.append(details);
-    fragment.append(card);
+    const key = job.actress || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(job);
   }
-  container.replaceChildren(fragment);
+  if (queueActress !== null && !groups.has(queueActress)) queueActress = null;
+  if (queueActress === null) {
+    $("queueDetail").hidden = true;
+    const box = $("queueGroups"); box.hidden = false; box.replaceChildren();
+    if (!data.jobs.length) {
+      const empty = node("div", undefined, "empty");
+      empty.append(node("div", "队", "empty-icon"), node("h3", "队列是空的"), node("p", "在搜索页粘贴视频网址，或从搜索结果一键加入。"));
+      box.append(empty);
+    }
+    const keys = [...groups.keys()].sort((a, b) => {
+      if (a === "") return 1; if (b === "") return -1;  // 未分类 always last
+      const ga = groups.get(a), gb = groups.get(b);
+      const actA = ga.some(j => ACTIVE_STATUS.includes(j.status)) ? 0 : 1;
+      const actB = gb.some(j => ACTIVE_STATUS.includes(j.status)) ? 0 : 1;
+      if (actA !== actB) return actA - actB;
+      if (gb.length !== ga.length) return gb.length - ga.length;
+      return a < b ? -1 : 1;
+    });
+    for (const key of keys) {
+      const jobs = groups.get(key);
+      const card = node("article", undefined, "qgroup");
+      const head = node("div", undefined, "job-head");
+      head.append(node("p", key || "未分类", "job-url"),
+                  node("span", countsText(jobs), "meta"),
+                  node("span", "›", "chev"));
+      card.append(head);
+      const progress = node("progress"); progress.max = 100;
+      progress.value = jobs.reduce((sum, j) => sum + jobPercent(j), 0) / jobs.length;
+      card.append(progress);
+      card.onclick = () => { queueActress = key; renderQueue(queueData); };
+      box.append(card);
+    }
+  } else {
+    $("queueGroups").hidden = true;
+    $("queueDetail").hidden = false;
+    const jobs = groups.get(queueActress) || [];
+    $("queueDetailTitle").textContent = queueActress || "未分类";
+    $("queueDetailMeta").textContent = countsText(jobs);
+    const container = $("jobs"); const fragment = document.createDocumentFragment();
+    for (const job of jobs) fragment.append(jobCard(job));
+    container.replaceChildren(fragment);
+  }
   // Keep search result badges in sync with queue membership.
   const queued = new Set(data.jobs.map(j => (j.url || "").replace(/\/+$/, "") + "/"));
   for (const card of document.querySelectorAll("#results .work")) {
@@ -503,16 +635,93 @@ async function doSearch() {
   const q = $("q").value.trim();
   if (!q) { toast("请输入番号或女优名"); return; }
   $("searchBtn").disabled = true; $("searchStatus").textContent = "搜索中…";
+  $("backfillRow").hidden = true;
   try {
     const data = await api("/api/search?q=" + encodeURIComponent(q) + "&site=" + encodeURIComponent(site));
     lastResults = data.results || [];
+    lastQuery = q;
     const grid = $("results"); grid.replaceChildren();
     if (data.error) { $("searchStatus").textContent = ""; toast(data.error); }
     else $("searchStatus").textContent = "共 " + data.total + " 条结果，本页 " + lastResults.length + " 条";
     if (!lastResults.length && !data.error) { const e = node("div", undefined, "empty"); e.append(node("h3", "没有结果"), node("p", "换个关键词或站点试试。")); grid.append(e); }
     for (const item of lastResults) grid.append(resultCard(item));
+    $("backfillRow").hidden = !lastResults.length;
   } catch (error) { $("searchStatus").textContent = ""; if (error.message !== "Unauthorized") toast(error.message); }
   finally { $("searchBtn").disabled = false; }
+}
+/* ---------------- backfill （一键补充入库） ---------------- */
+function renderBfConfirm() {
+  const ready = bfPlan ? (bfPlan.items || []).filter(i => i.status === "ready").length : 0;
+  const confirm = $("bfConfirm");
+  confirm.hidden = !!bfPlan && ready === 0;
+  confirm.disabled = !bfPlan || bfBusy || bfSel.size === 0;
+  confirm.textContent = "确认下载 " + bfSel.size + " 部";
+  $("bfCancel").textContent = bfPlan && ready === 0 ? "关闭" : "取消";
+}
+function renderBackfill() {
+  const items = (bfPlan && bfPlan.items) || [];
+  const ready = items.filter(i => i.status === "ready");
+  bfSel = new Set();
+  items.forEach((item, idx) => { if (item.status === "ready") bfSel.add(idx); });
+  const join = values => [...new Set(values.filter(Boolean))].join("、");
+  const cn = join(ready.map(i => i.actress_cn)), jp = join(ready.map(i => i.actress_jp));
+  $("bfSummary").textContent = "女优 " + (cn || jp || "—") + (jp && cn ? "（" + jp + "）" : "") +
+    " · 目标文件夹 " + (join(ready.map(i => i.target_dir)) || "—") + " · 可下载 " + ready.length + " 部";
+  $("bfCounts").textContent = "已排除：已在库 " + items.filter(i => i.status === "in_library").length +
+    " · 已在队列 " + items.filter(i => i.status === "in_queue").length +
+    " · 无法识别女优 " + items.filter(i => i.status === "no_actress").length;
+  const list = $("bfList"); list.replaceChildren();
+  if (!ready.length) list.append(node("p", "没有可下载的新作品。", "meta"));
+  items.forEach((item, idx) => {
+    if (item.status !== "ready") return;
+    const row = node("label", undefined, "bf-row");
+    const box = document.createElement("input"); box.type = "checkbox"; box.checked = true;
+    box.onchange = () => { box.checked ? bfSel.add(idx) : bfSel.delete(idx); renderBfConfirm(); };
+    const main = node("div", undefined, "bf-main");
+    const line = node("div", undefined, "bf-line");
+    line.append(node("span", item.code || "—", "bf-code"), node("span", item.title || item.site_title || ""));
+    main.append(line, node("div", item.target_name || "", "bf-target"));
+    row.append(box, main);
+    list.append(row);
+  });
+  renderBfConfirm();
+}
+function closeBackfill() { if (!bfBusy) $("bfModal").hidden = true; }
+async function openBackfill() {
+  if (!lastResults.length || bfBusy) return;
+  bfPlan = null; bfSel = new Set();
+  $("bfSummary").textContent = "正在计算入库计划…";
+  $("bfCounts").textContent = "";
+  $("bfList").replaceChildren();
+  $("bfError").textContent = "";
+  renderBfConfirm();
+  $("bfModal").hidden = false;
+  $("backfillBtn").disabled = true;
+  try {
+    bfPlan = await api("/api/backfill/plan", {
+      items: lastResults.map(r => ({url: r.url, code: r.code || "", title: r.title || ""})),
+      actress_hint: lastQuery});
+    renderBackfill();
+  } catch (error) {
+    if (error.message !== "Unauthorized") $("bfError").textContent = error.message;
+    renderBfConfirm();
+  } finally { $("backfillBtn").disabled = false; }
+}
+async function confirmBackfill() {
+  if (bfBusy || !bfPlan) return;
+  const chosen = [...bfSel].map(idx => bfPlan.items[idx]).filter(Boolean);
+  if (!chosen.length) return;
+  bfBusy = true; renderBfConfirm(); $("bfError").textContent = "";
+  try {
+    const data = await api("/api/backfill/start", {items: chosen.map(i => ({url: i.url, code: i.code || ""}))});
+    bfBusy = false;
+    $("bfModal").hidden = true; bfPlan = null; bfSel = new Set();
+    toast("已加入下载队列 " + data.added + " 部" + (data.skipped && data.skipped.length ? "，跳过 " + data.skipped.length + " 部" : ""));
+    refreshQueue();
+    showView("queue");
+  } catch (error) {
+    if (error.message !== "Unauthorized") $("bfError").textContent = error.message;
+  } finally { bfBusy = false; renderBfConfirm(); }
 }
 /* ---------------- library ---------------- */
 function fmtSize(bytes) {
@@ -521,17 +730,54 @@ function fmtSize(bytes) {
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return v.toFixed(v >= 100 ? 0 : 1) + " " + units[i];
 }
-let libWorks = [];
-function renderLibChips(data) {
+let libWorks = [], libActresses = [], libFolders = [], libChipsOpen = false;
+function renderLibChips() {
   const chips = $("libChips"); chips.replaceChildren();
   const add = (label, type, value) => {
     const b = node("button", label, "chip" + (libFilter.type === type && libFilter.value === value ? " active" : ""));
-    b.onclick = () => { libFilter = {type, value}; renderLibChips(data); renderLibGrid(); };
+    b.onclick = () => { libFilter = {type, value}; renderLibChips(); renderActSel(); renderLibGrid(); };
     chips.append(b);
   };
   add("全部", "all", "");
-  for (const name of data.actresses) add(name, "actress", name);
-  for (const name of data.folders) if (name !== "01-日本JAV") add(name, "folder", name);
+  for (const name of libFolders) if (name !== "01-日本JAV") add(name, "folder", name);
+  chips.classList.toggle("clamped", !libChipsOpen);
+  requestAnimationFrame(() => { $("libChipsToggle").hidden = chips.scrollHeight <= 90; });
+  $("libChipsToggle").textContent = libChipsOpen ? "收起" : "展开";
+}
+function actressCounts() {
+  const counts = {};
+  for (const w of libWorks) if (w.actress) counts[w.actress] = (counts[w.actress] || 0) + 1;
+  return counts;
+}
+function renderActSel() {
+  const box = $("libActSel"); box.replaceChildren();
+  if (libFilter.type !== "actress") return;
+  const chip = node("span", undefined, "sel-chip");
+  chip.append(node("span", libFilter.value));
+  const x = node("button", "✕"); x.title = "清除女优筛选";
+  x.onclick = () => { libFilter = {type: "all", value: ""}; renderLibChips(); renderActSel(); renderLibGrid(); };
+  chip.append(x);
+  box.append(chip);
+}
+function renderActPicker() {
+  const list = $("libActList");
+  const q = $("libActSearch").value.trim().toLowerCase();
+  const counts = actressCounts();
+  const names = libActresses.filter(name => !q || name.toLowerCase().includes(q));
+  list.replaceChildren();
+  if (!names.length) list.append(node("div", "没有匹配的女优", "picker-empty"));
+  for (const name of names.slice(0, 200)) {
+    const b = node("button", undefined, "picker-item");
+    b.append(node("span", name), node("span", "库内 " + (counts[name] || 0) + " 部", "cnt"));
+    b.onclick = () => {
+      libFilter = {type: "actress", value: name};
+      $("libActSearch").value = "";
+      list.hidden = true;
+      renderLibChips(); renderActSel(); renderLibGrid();
+    };
+    list.append(b);
+  }
+  list.hidden = false;
 }
 function renderLibGrid() {
   const grid = $("libGrid"); grid.replaceChildren();
@@ -543,7 +789,7 @@ function renderLibGrid() {
     const card = node("article", undefined, "work");
     const poster = node("div", undefined, "poster");
     poster.append(node("span", work.code || "—", "code-big"));
-    if (work.cover) { const img = document.createElement("img"); img.alt = ""; img.loading = "lazy"; img.src = "/api/cover?rel=" + encodeURIComponent(work.cover) + "&t=" + encodeURIComponent(sessionToken); img.onerror = () => img.remove(); poster.append(img); }
+    if (work.cover_rel) { const img = document.createElement("img"); img.alt = ""; img.loading = "lazy"; img.src = "/api/cover?rel=" + encodeURIComponent(work.cover_rel) + "&t=" + encodeURIComponent(sessionToken); img.onerror = () => img.remove(); poster.append(img); }
     card.append(poster);
     const body = node("div", undefined, "work-body");
     body.append(node("div", work.title || work.code || work.rel, "work-title"));
@@ -562,7 +808,8 @@ async function loadLibrary() {
   try {
     const data = await api("/api/library");
     libWorks = data.works || []; libLoaded = true;
-    renderLibChips(data); renderLibGrid();
+    libActresses = data.actresses || []; libFolders = data.folders || [];
+    renderLibChips(); renderActSel(); renderLibGrid();
   } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
 }
 /* ---------------- player ---------------- */
@@ -710,17 +957,21 @@ async function orgRollback(ids) {
 }
 /* ---------------- actress gap （女优缺片） ---------------- */
 let actLoaded = false, actMissing = [], actSel = new Set();
-function renderActChips(actresses) {
-  const chips = $("actChips"); chips.replaceChildren();
-  if (!actresses.length) { chips.append(node("span", "片库里还没有按女优归类的作品", "meta")); return; }
+function renderActList(actresses) {
+  const grid = $("actList"); grid.replaceChildren();
+  if (!actresses.length) { grid.append(node("span", "片库里还没有按女优归类的作品", "meta")); return; }
   for (const a of actresses) {
-    const b = node("button", a.name_cn + " · 库内 " + a.count + " 部", "chip");
+    const cell = node("div", undefined, "act-cell");
+    cell.append(node("span", a.name_cn, "act-cell-name"),
+                node("span", "库内 " + a.count + " 部", "act-cell-count"));
+    const b = node("button", "查询缺片");
     b.onclick = () => { $("actName").value = a.name_cn; doActGap(); };
-    chips.append(b);
+    cell.append(b);
+    grid.append(cell);
   }
 }
 async function loadActresses() {
-  try { const data = await api("/api/actress/list"); actLoaded = true; renderActChips(data.actresses || []); }
+  try { const data = await api("/api/actress/list"); actLoaded = true; renderActList(data.actresses || []); }
   catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
 }
 function renderActBar() {
@@ -758,6 +1009,7 @@ async function doActGap() {
   $("actQuery").disabled = true;
   $("actStatus").textContent = "查询中…（对照 Jable 全集需要几秒）";
   $("actOwned").textContent = "";
+  $("actOwnedGrid").replaceChildren();
   $("actGrid").replaceChildren(); $("actBar").hidden = true;
   try {
     const data = await api("/api/actress/gap", {name});
@@ -766,7 +1018,10 @@ async function doActGap() {
     actSel = new Set(actMissing.filter(m => !m.in_queue).map(m => m.code));
     const who = (data.actress_cn || name) + (data.actress_jp ? "（" + data.actress_jp + "）" : "");
     $("actStatus").textContent = who + " · 全集 " + data.total + " 部 · 已有 " + (data.owned || []).length + " · 缺 " + actMissing.length + (data.cached ? " · 全集来自 24 小时内缓存" : "");
-    $("actOwned").textContent = (data.owned || []).length ? "已有：" + data.owned.join("、") : "";
+    const owned = data.owned || [];
+    $("actOwned").textContent = owned.length ? "已有 " + owned.length + " 部：" : "";
+    const ownedGrid = $("actOwnedGrid");
+    for (const code of owned) ownedGrid.append(node("span", code, "tag lib"));
     if (!actMissing.length) toast("没有缺片，这个女优的全集都齐了");
     renderActGrid();
   } catch (error) { $("actStatus").textContent = ""; if (error.message !== "Unauthorized") toast(error.message); }
@@ -849,6 +1104,25 @@ $("add").onclick = async () => {
 $("clear").onclick = () => queueAction("/api/clear", {});
 $("resume").onclick = () => { if (confirm("已确认磁盘健康及剩余空间？")) queueAction("/api/resume", {}); };
 $("libRefresh").onclick = () => { libLoaded = false; loadLibrary(); };
+$("queueBack").onclick = () => { queueActress = null; if (queueData) renderQueue(queueData); };
+$("backfillBtn").onclick = openBackfill;
+$("bfClose").onclick = closeBackfill;
+$("bfCancel").onclick = closeBackfill;
+$("bfBackdrop").onclick = closeBackfill;
+$("bfConfirm").onclick = confirmBackfill;
+document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("bfModal").hidden) closeBackfill(); });
+$("libActSearch").oninput = () => renderActPicker();
+$("libActSearch").onfocus = () => renderActPicker();
+$("libActSearch").onkeydown = event => { if (event.key === "Escape") $("libActList").hidden = true; };
+$("libActAll").onclick = () => {
+  libFilter = {type: "all", value: ""};
+  $("libActSearch").value = ""; $("libActList").hidden = true;
+  renderLibChips(); renderActSel(); renderLibGrid();
+};
+$("libChipsToggle").onclick = () => { libChipsOpen = !libChipsOpen; renderLibChips(); };
+document.addEventListener("mousedown", event => {
+  if (!$("actPicker").contains(event.target)) $("libActList").hidden = true;
+});
 $("actQuery").onclick = doActGap;
 $("actName").onkeydown = event => { if (event.key === "Enter") doActGap(); };
 $("actEnqueue").onclick = async () => {

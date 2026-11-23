@@ -182,6 +182,16 @@ def _try_avbase(code):
     return ('avbase', parsed) if parsed else None
 
 
+def cached_lookup(code):
+    """Cached metadata for *code*, or None — never touches the network."""
+    code = (code or '').strip().upper()
+    if not code:
+        return None
+    with _lock:
+        cached = _load_hits().get(code)
+    return dict(cached) if cached else None
+
+
 def lookup(code):
     """Metadata for *code*; missing fields are None, never raises."""
     code = (code or '').strip().upper()
