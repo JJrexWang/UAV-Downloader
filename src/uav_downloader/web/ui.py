@@ -72,15 +72,63 @@ HTML = '''<!doctype html>
     </section>
     <section id="view-actress" class="view" hidden>
       <h2>女优缺片</h2>
-      <div class="empty"><div class="empty-icon">缺</div><h3>女优缺片</h3><p>该模块在二期上线：对照女优全集列出未下载番号，并提供一键入队。</p></div>
+      <div class="card">
+        <div class="chips" id="actChips"></div>
+        <div class="row wrap" style="margin-top:14px">
+          <input id="actName" type="search" placeholder="输入女优名（中文 / 日文 / 繁体）…" autocomplete="off">
+          <button id="actQuery" class="primary">查询缺片</button>
+        </div>
+        <p id="actStatus" class="meta"></p>
+        <p id="actOwned" class="meta"></p>
+      </div>
+      <div id="actGrid" class="grid"></div>
+      <div id="actBar" class="sticky-bar" hidden>
+        <span id="actSelText">已选 0 部</span>
+        <button id="actEnqueue" class="primary">一键入队</button>
+      </div>
     </section>
     <section id="view-filing" class="view" hidden>
-      <h2>归类预览</h2>
-      <div class="empty"><div class="empty-icon">归</div><h3>归类预览</h3><p>该模块在二期上线：下载完成后的重命名与归类待确认清单将出现在这里。</p></div>
+      <div class="section-head"><h2>归类预览</h2><button id="ppRefresh">刷新</button></div>
+      <p class="meta">下载完成后按番号规范生成的新名与归类去向。确认后才会移动文件；目标已存在时标记冲突，绝不覆盖。</p>
+      <div id="ppList"></div>
+      <div id="ppBar" class="sticky-bar" hidden>
+        <span id="ppSelText">已选 0 项</span>
+        <button id="ppExec" class="primary">执行选中</button>
+        <button id="ppExecAll">全部执行</button>
+        <button id="ppDismiss">忽略选中</button>
+      </div>
     </section>
     <section id="view-organize" class="view" hidden>
       <h2>本地整理</h2>
-      <div class="empty"><div class="empty-icon">整</div><h3>本地整理</h3><p>该模块在二期上线：扫描片库，生成番号规范化更名清单，先预览再执行。</p></div>
+      <div class="card">
+        <div class="row wrap">
+          <div class="chips" id="orgScopes">
+            <button data-scope="" class="chip active">全部</button>
+            <button data-scope="00-待分拣" class="chip">00-待分拣</button>
+            <button data-scope="01-日本JAV" class="chip">01-日本JAV</button>
+            <button data-scope="02-精选专辑" class="chip">02-精选专辑</button>
+          </div>
+          <button id="orgScan" class="primary">开始扫描</button>
+        </div>
+        <p class="meta">只动视频/封面/字幕 · 命名格式 番号-女优中文名（日文名）-中文片名 · 全名 ≤255 字节 · 符号半角 · 执行前会写入回滚记录。</p>
+        <p id="orgStatus" class="meta"></p>
+        <div id="orgStats" class="stat-grid" hidden>
+          <div class="stat"><span class="stat-num" id="stScanned">0</span><span>扫描视频</span></div>
+          <div class="stat"><span class="stat-num" id="stRename">0</span><span>可更名</span></div>
+          <div class="stat"><span class="stat-num" id="stIso">0</span><span>疑似误识别（隔离）</span></div>
+          <div class="stat"><span class="stat-num" id="stStd">0</span><span>已规范（F 级）</span></div>
+        </div>
+      </div>
+      <div id="orgList"></div>
+      <div id="orgIso"></div>
+      <div id="orgBar" class="sticky-bar" hidden>
+        <span id="orgSelText">已选 0 项</span>
+        <button id="orgExec" class="primary">执行更名</button>
+      </div>
+      <div class="card">
+        <div class="section-head"><h3>回滚记录</h3><button id="orgRollbackAll">撤销全部</button></div>
+        <div id="orgLog"></div>
+      </div>
     </section>
     <section id="view-settings" class="view" hidden>
       <h2>设置</h2>
@@ -199,6 +247,33 @@ details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospa
 .pl-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;font-weight:700}
 .icon-btn{width:38px;height:38px;border-radius:50%;padding:0;display:flex;align-items:center;justify-content:center;flex:none}
 #plVideo{width:100%;background:#000;border-radius:8px;max-height:66vh}
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:14px}
+.stat{background:var(--s1);border:1px solid var(--line);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:2px;color:var(--dim);font-size:13px}
+.stat-num{font-size:24px;font-weight:800;color:var(--on)}
+.plan{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
+.plan-head{display:flex;gap:10px;align-items:flex-start}
+.plan-head input[type="checkbox"]{width:18px;height:18px;flex:none;margin-top:3px;accent-color:var(--pri)}
+.plan-names{min-width:0;flex:1}
+.plan-src{overflow-wrap:anywhere;color:var(--mut);font-size:14px}
+.plan-arrow{color:var(--dim);margin:1px 0}
+.plan-new{overflow-wrap:anywhere;font-weight:700}
+.plan-target{color:var(--dim);font-size:13px;overflow-wrap:anywhere;margin-top:4px}
+.plan-side{display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex:none}
+.pstatus{font-size:12px;padding:4px 10px;border-radius:999px;background:var(--s3);color:var(--mut)}
+.pstatus.pending{background:#1f4d63;color:var(--pri)}
+.pstatus.done{background:#234d31;color:var(--ok)}
+.pstatus.conflict,.pstatus.error{background:#5a2d24;color:var(--bad)}
+.grade{font-size:12px;font-weight:800;padding:3px 9px;border-radius:999px;background:var(--s3);color:var(--mut)}
+.grade.A{background:#234d31;color:var(--ok)}
+.grade.B{background:#1f4d63;color:var(--pri)}
+.grade.C{background:#4a3a17;color:#f2c14e}
+.grade.D{background:#5a2d24;color:var(--bad)}
+.tag.low{background:#4a3a17;color:#f2c14e}
+.sticky-bar{position:sticky;bottom:14px;display:flex;align-items:center;gap:10px;background:var(--s2);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin:14px 0;box-shadow:0 6px 24px rgba(0,0,0,.35);z-index:5;flex-wrap:wrap}
+.log-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}
+.log-row .log-names{min-width:0;flex:1;overflow-wrap:anywhere;color:var(--mut)}
+.log-row button{padding:6px 12px;font-size:12px}
+.log-row.done{color:var(--dim)}
 #toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);background:var(--s3);color:var(--on);border:1px solid var(--line);padding:11px 20px;border-radius:999px;font-size:14px;opacity:0;pointer-events:none;transition:.2s;z-index:80;max-width:92vw;text-align:center}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 @media(max-width:760px){
@@ -210,11 +285,13 @@ details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospa
   .badge{margin-left:4px}
   #content{padding:18px 14px 110px}
   .settings-grid{grid-template-columns:1fr}
+  .stat-grid{grid-template-columns:repeat(2,1fr)}
+  .sticky-bar{bottom:86px}
   .grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
 }'''
 
 JS = r'''"use strict";
-let token = "", session = 0, timer = null, readSeq = 0, busy = false;
+let token = "", session = 0, timer = null, readSeq = 0, busy = false, ppTimer = null;
 let site = "jable", lastResults = [], libLoaded = false, libFilter = {type: "all", value: ""};
 let settings = {auto_rename: true, file_mode: "preview", lang: "zh-Hans"};
 const $ = id => document.getElementById(id);
@@ -233,15 +310,19 @@ async function api(path, body) {
   return data;
 }
 function disconnect() {
-  session++; readSeq++; token = ""; clearTimeout(timer);
+  session++; readSeq++; token = ""; clearTimeout(timer); clearInterval(ppTimer);
   $("app").hidden = true; $("auth").hidden = false; $("connect").disabled = false;
-  closePlayer(); libLoaded = false;
+  closePlayer(); libLoaded = false; actLoaded = false;
 }
 function showView(name) {
   for (const item of document.querySelectorAll(".nav-item")) item.classList.toggle("active", item.dataset.view === name);
   for (const view of document.querySelectorAll(".view")) view.hidden = view.id !== "view-" + name;
   if (name === "library" && !libLoaded) loadLibrary();
+  if (name === "actress" && !actLoaded) loadActresses();
   if (name === "settings") loadSettings();
+  if (name === "filing") { loadPlans(); clearInterval(ppTimer); ppTimer = setInterval(loadPlans, 5000); }
+  else clearInterval(ppTimer);
+  if (name === "organize") loadOrgState();
 }
 /* ---------------- queue ---------------- */
 function renderQueue(data) {
@@ -403,6 +484,200 @@ function closePlayer() {
   video.pause(); video.removeAttribute("src"); video.load();
   $("player").hidden = true;
 }
+/* ---------------- postprocess （归类预览） ---------------- */
+const PP_STATUS = {pending: "待确认", done: "已完成", conflict: "冲突", error: "失败", dismissed: "已忽略"};
+let ppPlans = [], ppSel = new Set();
+function renderPlans() {
+  const list = $("ppList"); list.replaceChildren();
+  const visible = ppPlans.filter(p => p.status !== "dismissed");
+  if (!visible.length) {
+    const e = node("div", undefined, "empty");
+    e.append(node("div", "归", "empty-icon"), node("h3", "暂无归类记录"), node("p", "下载完成后，待确认的重命名与归类会出现在这里。"));
+    list.append(e);
+  }
+  for (const plan of visible) {
+    const row = node("article", undefined, "plan");
+    const head = node("div", undefined, "plan-head");
+    if (plan.status === "pending") {
+      const box = document.createElement("input"); box.type = "checkbox"; box.checked = ppSel.has(plan.id);
+      box.onchange = () => { box.checked ? ppSel.add(plan.id) : ppSel.delete(plan.id); renderPlans(); };
+      head.append(box);
+    }
+    const names = node("div", undefined, "plan-names");
+    names.append(node("div", plan.src_name, "plan-src"), node("div", "↓", "plan-arrow"), node("div", plan.new_name, "plan-new"));
+    names.append(node("div", plan.target_rel ? "→ " + plan.target_rel : "→ 原地重命名（不移动）", "plan-target"));
+    if (plan.reason) names.append(node("p", plan.reason, "meta"));
+    head.append(names);
+    const side = node("div", undefined, "plan-side");
+    side.append(node("span", PP_STATUS[plan.status] || plan.status, "pstatus " + plan.status));
+    if (plan.source) side.append(node("span", plan.source, "tag"));
+    head.append(side);
+    row.append(head);
+    list.append(row);
+  }
+  const pending = ppPlans.filter(p => p.status === "pending");
+  ppSel = new Set([...ppSel].filter(id => pending.some(p => p.id === id)));
+  $("ppBar").hidden = !pending.length;
+  $("ppSelText").textContent = "已选 " + ppSel.size + " 项";
+}
+async function loadPlans() {
+  try { const data = await api("/api/postprocess"); ppPlans = data.plans || []; renderPlans(); }
+  catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+}
+async function ppRun(path, ids, doneText) {
+  if (!ids.length) { toast("先勾选要处理的条目"); return; }
+  try {
+    const data = await api(path, {ids});
+    ppPlans = data.plans || ppPlans; ppSel.clear(); renderPlans();
+    if (data.results) {
+      const ok = data.results.filter(r => r.status === "done").length;
+      const bad = data.results.length - ok;
+      toast(doneText + "：成功 " + ok + (bad ? "，异常 " + bad : ""));
+    } else toast(doneText);
+  } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+}
+/* ---------------- organize （本地整理） ---------------- */
+let orgScope = "", orgData = null, orgSel = new Set();
+function orgEntryRow(entry, selectable) {
+  const row = node("article", undefined, "plan");
+  const head = node("div", undefined, "plan-head");
+  if (selectable) {
+    const box = document.createElement("input"); box.type = "checkbox"; box.checked = orgSel.has(entry.id);
+    box.onchange = () => { box.checked ? orgSel.add(entry.id) : orgSel.delete(entry.id); renderOrg(); };
+    head.append(box);
+  }
+  const names = node("div", undefined, "plan-names");
+  names.append(node("div", entry.src_rel, "plan-src"), node("div", "↓", "plan-arrow"), node("div", entry.new_name || "—", "plan-new"));
+  if (entry.reason) names.append(node("p", entry.reason, "meta"));
+  head.append(names);
+  const side = node("div", undefined, "plan-side");
+  side.append(node("span", entry.grade + " 级", "grade " + entry.grade));
+  if (entry.source) side.append(node("span", entry.source, "tag"));
+  if (entry.actress_cn_low) side.append(node("span", "音译·低置信", "tag low"));
+  head.append(side);
+  row.append(head);
+  return row;
+}
+function renderOrg() {
+  const stats = orgData && orgData.stats;
+  $("orgStats").hidden = !stats;
+  if (stats) {
+    $("stScanned").textContent = stats.scanned; $("stRename").textContent = stats.renamable;
+    $("stIso").textContent = stats.isolated; $("stStd").textContent = stats.standard;
+    $("orgStatus").textContent = orgData.scope ? "范围：" + orgData.scope : "范围：全部";
+  }
+  const list = $("orgList"); list.replaceChildren();
+  const entries = (orgData && orgData.entries) || [];
+  if (stats && !entries.length) {
+    const e = node("div", undefined, "empty");
+    e.append(node("div", "整", "empty-icon"), node("h3", "没有待更名的文件"), node("p", "这个范围里的视频都已符合命名规范，或无法识别番号。"));
+    list.append(e);
+  }
+  for (const entry of entries) list.append(orgEntryRow(entry, true));
+  const iso = $("orgIso"); iso.replaceChildren();
+  const isolated = (orgData && orgData.isolated) || [];
+  if (isolated.length) {
+    iso.append(node("h3", "疑似误识别 · 已隔离（不会执行）"));
+    for (const entry of isolated) iso.append(orgEntryRow(entry, false));
+  }
+  orgSel = new Set([...orgSel].filter(id => entries.some(e => e.id === id)));
+  $("orgBar").hidden = !entries.length;
+  $("orgSelText").textContent = "已选 " + orgSel.size + " 项";
+  const logBox = $("orgLog"); logBox.replaceChildren();
+  const log = (orgData && orgData.log) || [];
+  if (!log.length) logBox.append(node("p", "暂无更名记录。", "meta"));
+  for (const item of [...log].reverse()) {
+    const row = node("div", undefined, "log-row" + (item.reverted ? " done" : ""));
+    const names = node("div", undefined, "log-names");
+    names.append(node("div", item.old_rel), node("div", "→ " + item.new_rel));
+    row.append(names);
+    if (item.reverted) row.append(node("span", "已撤销", "tag"));
+    else {
+      const b = node("button", "撤销");
+      b.onclick = () => orgRollback([item.idx]);
+      row.append(b);
+    }
+    logBox.append(row);
+  }
+  $("orgRollbackAll").disabled = !log.some(item => !item.reverted);
+}
+async function loadOrgState() {
+  try { orgData = await api("/api/organize"); renderOrg(); }
+  catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+}
+async function orgRollback(ids) {
+  if (!confirm("撤销选中的更名，把文件改回原名？")) return;
+  try {
+    const data = await api("/api/organize/rollback", ids === null ? {} : {ids});
+    orgData = data;
+    toast("已撤销 " + data.result.rolled + " 项" + (data.result.failed.length ? "，" + data.result.failed.length + " 项失败" : ""));
+    renderOrg();
+  } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+}
+/* ---------------- actress gap （女优缺片） ---------------- */
+let actLoaded = false, actMissing = [], actSel = new Set();
+function renderActChips(actresses) {
+  const chips = $("actChips"); chips.replaceChildren();
+  if (!actresses.length) { chips.append(node("span", "片库里还没有按女优归类的作品", "meta")); return; }
+  for (const a of actresses) {
+    const b = node("button", a.name_cn + " · 库内 " + a.count + " 部", "chip");
+    b.onclick = () => { $("actName").value = a.name_cn; doActGap(); };
+    chips.append(b);
+  }
+}
+async function loadActresses() {
+  try { const data = await api("/api/actress/list"); actLoaded = true; renderActChips(data.actresses || []); }
+  catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+}
+function renderActBar() {
+  $("actBar").hidden = !actMissing.length;
+  $("actSelText").textContent = "已选 " + actSel.size + " 部";
+}
+function renderActGrid() {
+  const grid = $("actGrid"); grid.replaceChildren();
+  for (const item of actMissing) {
+    const card = node("article", undefined, "work");
+    const poster = node("div", undefined, "poster");
+    poster.append(node("span", item.code || "—", "code-big"));
+    if (item.thumbnail) { const img = document.createElement("img"); img.alt = ""; img.loading = "lazy"; img.src = item.thumbnail; img.onerror = () => img.remove(); poster.append(img); }
+    card.append(poster);
+    const body = node("div", undefined, "work-body");
+    body.append(node("div", item.title || item.code, "work-title"));
+    const meta = node("div", undefined, "work-meta");
+    if (item.code) meta.append(node("span", item.code));
+    if (item.in_queue) meta.append(node("span", "已在队列", "tag queue"));
+    body.append(meta);
+    const label = node("label", undefined, "row");
+    const box = document.createElement("input"); box.type = "checkbox";
+    box.checked = actSel.has(item.code); box.disabled = !!item.in_queue;
+    box.style.width = "18px"; box.style.height = "18px"; box.style.flex = "none"; box.style.accentColor = "var(--pri)";
+    box.onchange = () => { box.checked ? actSel.add(item.code) : actSel.delete(item.code); renderActBar(); };
+    label.append(box, node("span", item.in_queue ? "已在队列" : "加入下载队列"));
+    body.append(label);
+    card.append(body); grid.append(card);
+  }
+  renderActBar();
+}
+async function doActGap() {
+  const name = $("actName").value.trim();
+  if (!name) { toast("请输入女优名，或点上面的片库女优"); return; }
+  $("actQuery").disabled = true;
+  $("actStatus").textContent = "查询中…（对照 Jable 全集需要几秒）";
+  $("actOwned").textContent = "";
+  $("actGrid").replaceChildren(); $("actBar").hidden = true;
+  try {
+    const data = await api("/api/actress/gap", {name});
+    if (data.error) { $("actStatus").textContent = data.error; actMissing = []; actSel.clear(); return; }
+    actMissing = data.missing || [];
+    actSel = new Set(actMissing.filter(m => !m.in_queue).map(m => m.code));
+    const who = (data.actress_cn || name) + (data.actress_jp ? "（" + data.actress_jp + "）" : "");
+    $("actStatus").textContent = who + " · 全集 " + data.total + " 部 · 已有 " + (data.owned || []).length + " · 缺 " + actMissing.length + (data.cached ? " · 全集来自 24 小时内缓存" : "");
+    $("actOwned").textContent = (data.owned || []).length ? "已有：" + data.owned.join("、") : "";
+    if (!actMissing.length) toast("没有缺片，这个女优的全集都齐了");
+    renderActGrid();
+  } catch (error) { $("actStatus").textContent = ""; if (error.message !== "Unauthorized") toast(error.message); }
+  finally { $("actQuery").disabled = false; }
+}
 /* ---------------- settings ---------------- */
 function renderSettings() {
   $("setRename").checked = !!settings.auto_rename;
@@ -430,6 +705,52 @@ $("add").onclick = async () => {
 $("clear").onclick = () => queueAction("/api/clear", {});
 $("resume").onclick = () => { if (confirm("已确认磁盘健康及剩余空间？")) queueAction("/api/resume", {}); };
 $("libRefresh").onclick = () => { libLoaded = false; loadLibrary(); };
+$("actQuery").onclick = doActGap;
+$("actName").onkeydown = event => { if (event.key === "Enter") doActGap(); };
+$("actEnqueue").onclick = async () => {
+  const chosen = actMissing.filter(m => actSel.has(m.code) && !m.in_queue);
+  if (!chosen.length) { toast("先勾选要下载的缺片"); return; }
+  $("actEnqueue").disabled = true;
+  try {
+    await api("/api/queue", {jobs: chosen.map(m => ({url: m.url}))});
+    for (const m of chosen) { m.in_queue = true; actSel.delete(m.code); }
+    renderActGrid(); refreshQueue();
+    toast("已入队 " + chosen.length + " 部");
+  } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+  finally { $("actEnqueue").disabled = false; }
+};
+$("ppRefresh").onclick = loadPlans;
+$("ppExec").onclick = () => ppRun("/api/postprocess/execute", [...ppSel], "归类执行完毕");
+$("ppExecAll").onclick = () => ppRun("/api/postprocess/execute", ppPlans.filter(p => p.status === "pending").map(p => p.id), "归类执行完毕");
+$("ppDismiss").onclick = () => ppRun("/api/postprocess/dismiss", [...ppSel], "已忽略选中条目");
+for (const chip of document.querySelectorAll("#orgScopes .chip")) chip.onclick = () => {
+  orgScope = chip.dataset.scope;
+  for (const c of document.querySelectorAll("#orgScopes .chip")) c.classList.toggle("active", c === chip);
+};
+$("orgScan").onclick = async () => {
+  $("orgScan").disabled = true; $("orgStatus").textContent = "扫描中…（大片库的元数据查询可能需要一会儿）";
+  try {
+    await api("/api/organize/scan", {scope: orgScope});
+    orgSel.clear();
+    await loadOrgState();
+    for (const entry of (orgData.entries || [])) orgSel.add(entry.id);
+    renderOrg();
+    toast("扫描完成");
+  } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+  finally { $("orgScan").disabled = false; }
+};
+$("orgExec").onclick = async () => {
+  const ids = [...orgSel];
+  if (!ids.length) { toast("先勾选要更名的文件"); return; }
+  if (!confirm("将更名 " + ids.length + " 个文件，执行前会写入回滚记录，可一键撤销。")) return;
+  try {
+    const data = await api("/api/organize/execute", {ids});
+    orgData = data; orgSel.clear(); renderOrg();
+    const ok = data.results.filter(r => r.ok).length;
+    toast("更名完成：成功 " + ok + (data.results.length - ok ? "，跳过 " + (data.results.length - ok) : ""));
+  } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+};
+$("orgRollbackAll").onclick = () => orgRollback(null);
 $("plClose").onclick = closePlayer;
 $("plBackdrop").onclick = closePlayer;
 document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("player").hidden) closePlayer(); });

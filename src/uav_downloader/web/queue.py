@@ -288,6 +288,16 @@ class QueueManager:
             except Exception as exc:
                 # Do not expose provider URLs, query credentials or arbitrary response bodies.
                 status, detail = 'failed', 'Download failed (' + type(exc).__name__[:60] + '); retry after checking source/access'
+            # --- Phase 2 postprocess hook: build rename/filing plans for a
+            # successfully finished job.  Fully isolated: it must never
+            # affect the job's status, the queue, or this worker loop. ---
+            if status == 'completed':
+                try:
+                    from . import postprocess
+                    postprocess.plan_for_completed_job(copy.deepcopy(job), self.root)
+                except Exception:
+                    pass
+            # --- end Phase 2 postprocess hook ---
             with self._condition:
                 self._active = None
                 if not storage_failed and self._cancel.is_set():

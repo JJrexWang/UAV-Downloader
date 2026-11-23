@@ -9,8 +9,25 @@ import threading
 from urllib.parse import parse_qs, urlsplit
 
 from uav_downloader.core.storage import StorageWriteError
-from . import library, searchsvc
+from . import actress, library, organize, postprocess, searchsvc
 from .ui import HTML, CSS, JS
+
+
+def _id_list(data, required=True):
+    """Validate an ``{ids: [...]}`` body; returns the id list (str-coerced)."""
+    if set(data) - {'ids'} or (required and 'ids' not in data):
+        raise ValueError('Expected only ids')
+    ids = data.get('ids')
+    if ids is None:
+        return None
+    if not isinstance(ids, list) or len(ids) > 500:
+        raise ValueError('ids must be a list')
+    out = []
+    for item in ids:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            raise ValueError('ids must be strings or integers')
+        out.append(str(item))
+    return out
 
 MAX_BODY = 256 * 1024
 DEFAULT_SETTINGS = {'auto_rename': True, 'file_mode': 'preview', 'lang': 'zh-Hans'}
@@ -304,6 +321,15 @@ def make_server(host, port, token, queue, allowed_hosts=None):
                     self._send(200, *static[self.path])
             elif self.path == '/api/queue' and self._auth():
                 self._send(200, queue.snapshot())
+            elif self.path == '/api/actress/list':
+                if self._auth():
+                    self._send(200, {'actresses': actress.library_actresses()})
+            elif self.path in ('/api/postprocess', '/api/organize'):
+                if self._auth():
+                    if self.path == '/api/postprocess':
+                        self._send(200, {'plans': postprocess.load_plans()})
+                    else:
+                        self._send(200, organize.state_view())
             elif self.path != '/api/queue':
                 self._send(404, {'error': 'Not found'})
 
@@ -333,6 +359,31 @@ def make_server(host, port, token, queue, allowed_hosts=None):
                     return
                 if self.path == '/api/settings':
                     self._send(200, save_settings(data))
+                    return
+                if self.path == '/api/actress/gap':
+                    if set(data) != {'name'} or not isinstance(data['name'], str):
+                        raise ValueError('Expected only name')
+                    self._send(200, actress.gap(data['name'], queue.snapshot()))
+                    return
+                if self.path == '/api/postprocess/execute':
+                    self._send(200, {'results': postprocess.execute(_id_list(data)),
+                                     'plans': postprocess.load_plans()})
+                    return
+                if self.path == '/api/postprocess/dismiss':
+                    self._send(200, {'plans': postprocess.dismiss(_id_list(data))})
+                    return
+                if self.path == '/api/organize/scan':
+                    if set(data) != {'scope'} or data['scope'] not in organize.SCOPES:
+                        raise ValueError('Expected a valid scope')
+                    self._send(200, organize.scan(data['scope']))
+                    return
+                if self.path == '/api/organize/execute':
+                    self._send(200, {'results': organize.execute(_id_list(data)),
+                                     **organize.state_view()})
+                    return
+                if self.path == '/api/organize/rollback':
+                    self._send(200, {'result': organize.rollback(_id_list(data, required=False)),
+                                     **organize.state_view()})
                     return
                 if self.path in {'/api/resume', '/api/clear'}:
                     if data:
