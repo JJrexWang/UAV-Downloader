@@ -4,14 +4,14 @@
 No downloader mock is installed: the actual CLI and Web entry point run in the
 built image. An explicitly halted, private temporary queue prevents its one
 synthetic URL from executing. Docker additionally prohibits external networking.
-The script prints check names only, never its generated ephemeral access token.
+The script prints check names only, never the session token or passwords it
+uses against the account login system.
 """
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
-import secrets
 import shutil
 import socket
 import subprocess
@@ -23,6 +23,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 READY_TIMEOUT = 60
 SYNTHETIC_URL = 'https://jable.tv/videos/ci-smoke-001/'
+SMOKE_PASSWORD = 'smoke-pass-123'
 
 
 def expect_status(response, expected):
@@ -45,7 +46,7 @@ def request(base, path, token=None, body=None, headers=None):
         return response.status, response.headers, response.read()
 
 
-def stop_web(process, token):
+def stop_web(process, secret):
     if process.poll() is None:
         process.terminate()
     try:
@@ -54,7 +55,8 @@ def stop_web(process, token):
         process.kill()
         process.communicate(timeout=5)
         raise AssertionError('Web entry point did not stop within 15 seconds') from None
-    assert token.encode() not in output, 'Access token must not appear in service logs'
+    assert secret.encode() not in output, 'Session token must not appear in service logs'
+    assert SMOKE_PASSWORD.encode() not in output, 'Password must not appear in service logs'
     if os.name != 'nt':
         assert process.returncode == 0, 'Web entry point did not shut down cleanly'
     return output
@@ -76,8 +78,16 @@ def start_web(environment, base):
                 time.sleep(.2)
         raise AssertionError('Web entry point readiness timed out')
     except BaseException:
-        stop_web(process, environment['UAV_WEB_TOKEN'])
+        if process.poll() is None:
+            process.terminate()
         raise
+
+
+def login(base, username, password):
+    status, _, body = request(base, '/api/login', None,
+                              {'username': username, 'password': password})
+    assert status == 200, f'login failed: HTTP {status}'
+    return json.loads(body)
 
 
 def main():
@@ -101,62 +111,81 @@ def main():
         state.mkdir(mode=0o700)
         state_file = state / 'queue.json'
         state_file.write_text(json.dumps({'version': 1, 'halted': True, 'jobs': []}), encoding='utf-8')
-        token = secrets.token_urlsafe(48)
         with socket.socket() as available:
             available.bind(('127.0.0.1', 0))
             port = available.getsockname()[1]
         base = f'http://127.0.0.1:{port}'
         environment = dict(os.environ)
+        environment.pop('UAV_WEB_TOKEN', None)  # account login replaces the shared token
         environment.update(
-            UAV_WEB_TOKEN=token, UAV_WEB_HOST='127.0.0.1', UAV_WEB_PORT=str(port),
+            UAV_WEB_PORT=str(port),
             UAV_WEB_ALLOWED_HOSTS=f'127.0.0.1:{port}',
             UAV_WEB_STATE_DIR=str(state), DOWNLOAD_DIR=str(root / 'downloads'))
         process = start_web(environment, base)
+        session = None
         try:
             status, headers, body = expect_status(request(base, '/'), 200)
-            assert b'UAV Downloader Web' in body and token.encode() not in body
+            assert b'UAV Downloader Web' in body
             assert "frame-ancestors 'none'" in headers['Content-Security-Policy']
             expect_status(request(base, '/app.js'), 200)
             expect_status(request(base, '/app.css'), 200)
             expect_status(request(base, '/api/queue'), 401)
-            expect_status(request(base, '/api/queue', token + 'wrong'), 401)
-            expect_status(request(base, '/api/queue', token, headers={'Origin': 'https://foreign.invalid'}), 403)
-            expect_status(request(base, '/api/queue', token, headers={'Host': 'foreign.invalid'}), 403)
-            snapshot = json.loads(expect_status(request(base, '/api/queue', token), 200)[2])
+            expect_status(request(base, '/api/queue', 'not-a-session'), 401)
+            # Account login: bad password rejected, default admin accepted but
+            # fenced by the forced password change until it is completed.
+            expect_status(request(base, '/api/login', None,
+                                  {'username': 'admin', 'password': 'wrong'}), 401)
+            granted = login(base, 'admin', 'admin')
+            assert granted['must_change'] is True and granted['role'] == 'admin'
+            session = granted['session']
+            expect_status(request(base, '/api/queue', session), 403)
+            changed = json.loads(expect_status(request(
+                base, '/api/change-password', session,
+                {'old_password': 'admin', 'new_password': SMOKE_PASSWORD}), 200)[2])
+            assert changed['ok'] is True
+            expect_status(request(base, '/api/queue', session,
+                                  headers={'Origin': 'https://foreign.invalid'}), 403)
+            expect_status(request(base, '/api/queue', session,
+                                  headers={'Host': 'foreign.invalid'}), 403)
+            snapshot = json.loads(expect_status(request(base, '/api/queue', session), 200)[2])
             assert snapshot == {'jobs': [], 'halted': True, 'worker_limit': 1}
-            checks.append('actual-web-entrypoint-root-assets-auth-host-origin')
+            checks.append('actual-web-entrypoint-root-assets-login-host-origin')
 
-            expect_status(request(base, '/api/queue', token, {'jobs': [{'url': 'https://localhost/private'}]}), 400)
-            added = json.loads(expect_status(request(base, '/api/queue', token, {
+            expect_status(request(base, '/api/queue', session, {'jobs': [{'url': 'https://localhost/private'}]}), 400)
+            added = json.loads(expect_status(request(base, '/api/queue', session, {
                 'jobs': [{'url': SYNTHETIC_URL, 'resolution': '720',
                           'max_workers': 1, 'speed_limit_mib': .5}]}), 201)[2])
             identity = added['jobs'][0]['id']
             assert added['jobs'][0]['status'] == 'pending'
             for endpoint, expected in (('cancel', 'cancelled'), ('retry', 'pending'), ('cancel', 'cancelled')):
                 snapshot = json.loads(expect_status(request(
-                    base, '/api/' + endpoint, token, {'id': identity}), 200)[2])
+                    base, '/api/' + endpoint, session, {'id': identity}), 200)[2])
                 assert snapshot['halted'] and snapshot['jobs'][0]['status'] == expected
                 assert 'running' not in snapshot['jobs'][0]['logs']
             persisted = state_file.read_bytes()
-            assert token.encode() not in persisted
+            assert session.encode() not in persisted
+            assert SMOKE_PASSWORD.encode() not in persisted
             assert json.loads(persisted)['jobs'][0]['status'] == 'cancelled'
             assert not list((root / 'downloads').iterdir()), 'Synthetic job must never download any files'
             checks.append('halted-offline-queue-add-cancel-retry-and-atomic-persistence')
         finally:
-            output = stop_web(process, token)
+            output = stop_web(process, session or 'no-session')
             assert b'Web ready' in output
 
         # Exercise a real entry-point restart, not just a second in-process queue object.
         process = start_web(environment, base)
         try:
-            snapshot = json.loads(expect_status(request(base, '/api/queue', token), 200)[2])
+            # Sessions persist across restarts; the changed password replaced the default.
+            snapshot = json.loads(expect_status(request(base, '/api/queue', session), 200)[2])
             assert snapshot['halted'] and snapshot['jobs'][0]['id'] == identity
             assert snapshot['jobs'][0]['status'] == 'cancelled'
-            cleared = json.loads(expect_status(request(base, '/api/clear', token, {}), 200)[2])
+            expect_status(request(base, '/api/login', None,
+                                  {'username': 'admin', 'password': 'admin'}), 401)
+            cleared = json.loads(expect_status(request(base, '/api/clear', session, {}), 200)[2])
             assert not cleared['jobs'] and cleared['halted']
             checks.append('actual-web-process-restart-and-clear-finished')
         finally:
-            stop_web(process, token)
+            stop_web(process, session)
     print(json.dumps({'passed': True, 'checks': checks, 'external_downloads': 0}))
 
 
