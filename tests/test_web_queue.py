@@ -9,10 +9,14 @@ from urllib.error import HTTPError
 import pytest
 
 from uav_downloader.web.queue import QueueManager, run_download, validate_job
-from uav_downloader.web.server import make_server, validate_token
+from uav_downloader.web.server import make_server
 
 
-TOKEN = 'test-only-Z9k2W5m8P3r6D1v4J7x0N2c5'
+# Account login replaced the shared UAV_WEB_TOKEN: TOKEN now holds the login
+# session issued to the `web` fixture (bootstrap admin + forced password
+# change), and is used as the Bearer credential by the API tests below.
+TOKEN = None
+TEST_PASSWORD = 'test-password-123'
 URL = 'https://jable.tv/videos/test-123/'
 
 
@@ -52,10 +56,17 @@ def test_web_accepts_supported_missav_www_pages(domain):
     assert validate_job({'url': url})['url'] == url
 
 
-@pytest.mark.parametrize('value', [None, '', 'short', 'x' * 50, 'a b' * 20])
-def test_token_required_and_high_entropy(value):
-    with pytest.raises(ValueError):
-        validate_token(value)
+def test_account_store_bootstraps_admin_and_verifies_password(tmp_path, monkeypatch):
+    from uav_downloader.web import auth
+    monkeypatch.setenv('UAV_WEB_STATE_DIR', str(tmp_path / 'state'))
+    auth.ensure_bootstrap()
+    users = auth.list_users()
+    assert len(users) == 1
+    assert users[0]['username'] == 'admin' and users[0]['role'] == 'admin'
+    assert users[0]['must_change'] is True
+    assert (tmp_path / 'state' / 'users.json').exists()
+    assert auth.authenticate('admin', 'not-the-password') is None
+    assert auth.authenticate('admin', 'admin')['username'] == 'admin'
 
 
 @pytest.mark.parametrize('extra', [
@@ -237,12 +248,25 @@ def test_cancelled_transport_exception_is_cancelled_not_failed(tmp_path):
 
 
 @pytest.fixture
-def web(tmp_path):
+def web(tmp_path, monkeypatch):
+    global TOKEN
+    monkeypatch.setenv('UAV_WEB_STATE_DIR', str(tmp_path / 'state'))
     q = QueueManager(tmp_path / 'downloads', tmp_path / 'state', autostart=False)
-    server = make_server('127.0.0.1', 0, TOKEN, q)
+    server = make_server('127.0.0.1', 0, q)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f'http://127.0.0.1:{server.server_port}'
+    # Sign in with the bootstrap admin and complete the forced password
+    # change; the resulting session is the tests' Bearer credential.
+    status, _, body = request(base, '/api/login',
+                              {'username': 'admin', 'password': 'admin'})
+    assert status == 200
+    session = json.loads(body)['session']
+    status, _, _ = request(base, '/api/change-password',
+                           {'old_password': 'admin', 'new_password': TEST_PASSWORD},
+                           Authorization='Bearer ' + session)
+    assert status == 200
+    TOKEN = session
     yield base, q
     server.shutdown()
     server.server_close()
@@ -264,6 +288,7 @@ def request(base, path, data=None, **headers):
 def test_api_auth_origin_host_and_no_token_query(web):
     base, q = web
     assert request(base, '/api/queue')[0] == 401
+    assert request(base, '/api/queue', Authorization='Bearer not-a-session')[0] == 401
     assert request(base, '/api/queue?token=' + TOKEN)[0] == 400
     auth = {'Authorization': 'Bearer ' + TOKEN}
     assert request(base, '/api/queue', **auth)[0] == 200
@@ -356,7 +381,8 @@ def test_entrypoint_binds_before_starting_downloads(tmp_path, monkeypatch):
         return queue
     def bind_failure(*args, **kwargs):
         raise OSError('port already in use')
-    monkeypatch.setenv('UAV_WEB_TOKEN', TOKEN)
+    # Account login needs no shared-token env: startup must proceed without it.
+    monkeypatch.delenv('UAV_WEB_TOKEN', raising=False)
     monkeypatch.setenv('DOWNLOAD_DIR', str(tmp_path / 'downloads'))
     monkeypatch.setenv('UAV_WEB_STATE_DIR', str(tmp_path / 'state'))
     monkeypatch.setattr(entry, 'QueueManager', queue_factory)
