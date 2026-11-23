@@ -4,12 +4,12 @@ import signal
 import threading
 
 from .queue import QueueManager
-from .server import make_server, validate_token
+from .server import make_server
 
 
 def main():
-    # Validate the secret before creating state or opening a listener.
-    token = validate_token(os.environ.get('UAV_WEB_TOKEN'))
+    # Account login lives in the state dir (see auth.py); no shared token
+    # env is needed — or read — any more.
     host = os.environ.get('UAV_WEB_HOST', '127.0.0.1')
     port = int(os.environ.get('UAV_WEB_PORT', '8765'))
     if not 1 <= port <= 65535:
@@ -19,13 +19,13 @@ def main():
     queue = QueueManager(os.environ.get('DOWNLOAD_DIR', '/downloads'),
                          os.environ.get('UAV_WEB_STATE_DIR', '/state'), autostart=False)
     try:
-        server = make_server(host, port, token, queue, hosts)
+        server = make_server(host, port, queue, hosts)
         def shutdown(*_args):
             threading.Thread(target=server.shutdown, daemon=True).start()
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, shutdown)
         queue.start()
-        print('UAV Downloader Web ready. Authentication required; keep behind VPN/TLS.', flush=True)
+        print('UAV Downloader Web ready. Account login required (first run: admin/admin, change forced); keep behind VPN/TLS.', flush=True)
         try:
             server.serve_forever(poll_interval=.25)
         finally:

@@ -1,21 +1,52 @@
 """HGhub-style single-page UI for the NAS web queue (dependency-free).
 
-The access token lives only in this tab's JavaScript memory; media URLs use
-the ?t= query form because <img>/<video> elements cannot set headers.
+Account login: the session token issued by /api/login lives only in this
+tab's JavaScript memory; media URLs use the ?t= query form because
+<img>/<video> elements cannot set headers.
 """
 
 HTML = '''<!doctype html>
 <html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>UAV Downloader Web</title><link rel="stylesheet" href="/app.css"><script src="/app.js" defer></script></head>
 <body>
-<section id="auth">
+<section id="auth" class="gate">
   <div class="auth-card">
     <p class="eyebrow">NAS · WEB 队列</p>
     <h1>UAV Downloader</h1>
-    <p class="muted">输入访问令牌连接下载队列。令牌只保留在此标签页内存中，刷新后需重新输入。</p>
-    <label for="token">访问令牌</label>
-    <div class="row"><input id="token" type="password" autocomplete="off" spellcheck="false"><button id="connect" class="primary">连接</button></div>
+    <p class="muted">使用账号登录。首次使用默认账号 admin / admin，登录后会先要求修改密码。</p>
+    <label for="loginUser">用户名</label>
+    <input id="loginUser" type="text" autocomplete="username" spellcheck="false">
+    <label for="loginPass">密码</label>
+    <div class="row"><input id="loginPass" type="password" autocomplete="current-password"><button id="loginBtn" class="primary">登录</button></div>
     <p id="authNotice" class="notice" role="status" aria-live="polite"></p>
+  </div>
+</section>
+<section id="forceChange" class="gate" hidden>
+  <div class="auth-card">
+    <p class="eyebrow">NAS · WEB 队列</p>
+    <h1>先修改密码</h1>
+    <p class="muted">这是首次登录，或密码刚被管理员重置。设置新密码后才能进入，无法跳过。</p>
+    <label for="fcNew">新密码（至少 8 位）</label>
+    <input id="fcNew" type="password" autocomplete="new-password">
+    <label for="fcConfirm">确认新密码</label>
+    <div class="row"><input id="fcConfirm" type="password" autocomplete="new-password"><button id="fcSubmit" class="primary">设置密码</button></div>
+    <p id="fcNotice" class="notice" role="status" aria-live="polite"></p>
+    <button id="fcLogout" class="ghost">退出登录</button>
+  </div>
+</section>
+<section id="onboard" class="gate" hidden>
+  <div class="auth-card">
+    <p class="eyebrow">欢迎使用</p>
+    <h1>再建一个常用账号</h1>
+    <p class="muted">建议新建一个普通用户账号供日常使用，admin 只用来管理用户。也可以暂时跳过，之后随时在「用户管理」里创建。</p>
+    <label for="obUser">用户名</label>
+    <input id="obUser" type="text" autocomplete="off" spellcheck="false">
+    <label for="obPass">密码（至少 8 位）</label>
+    <input id="obPass" type="password" autocomplete="new-password">
+    <label for="obRole">角色</label>
+    <select id="obRole"><option value="user">普通用户</option><option value="admin">管理员</option></select>
+    <div class="row gate-actions"><button id="obCreate" class="primary">创建账号并进入</button><button id="obSkip" class="ghost">暂时跳过</button></div>
+    <p id="obNotice" class="notice" role="status" aria-live="polite"></p>
   </div>
 </section>
 <div id="app" hidden>
@@ -29,8 +60,9 @@ HTML = '''<!doctype html>
       <button data-view="filing" class="nav-item">归类预览</button>
       <button data-view="organize" class="nav-item">本地整理</button>
       <button data-view="settings" class="nav-item">设置</button>
+      <button data-view="users" class="nav-item" id="navUsers" hidden>用户管理</button>
     </nav>
-    <div class="side-foot"><span class="dot"></span><span id="connState">已连接</span><button id="disconnect" class="ghost">断开</button></div>
+    <div class="side-foot"><span class="dot"></span><span id="connState">未登录</span><button id="disconnect" class="ghost">退出</button></div>
   </aside>
   <main id="content">
     <section id="view-search" class="view">
@@ -130,6 +162,19 @@ HTML = '''<!doctype html>
         <div id="orgLog"></div>
       </div>
     </section>
+    <section id="view-users" class="view" hidden>
+      <h2>用户管理</h2>
+      <div class="card">
+        <h3>新建用户</h3>
+        <div class="settings-grid">
+          <label><span>用户名</span><input id="nuUser" type="text" autocomplete="off" spellcheck="false"></label>
+          <label><span>密码（至少 8 位）</span><input id="nuPass" type="password" autocomplete="new-password"></label>
+          <label><span>角色</span><select id="nuRole"><option value="user">普通用户</option><option value="admin">管理员</option></select></label>
+        </div>
+        <button id="nuCreate" class="primary">新建用户</button>
+      </div>
+      <div class="card"><div id="userList"></div></div>
+    </section>
     <section id="view-settings" class="view" hidden>
       <h2>设置</h2>
       <div class="card">
@@ -140,6 +185,15 @@ HTML = '''<!doctype html>
         <div class="setting-row"><div><h3>界面语言</h3><p class="meta">同时决定站点标题语言。</p></div>
         <select id="setLang"><option value="zh-Hans">简体中文</option><option value="zh">繁體中文</option><option value="en">English</option><option value="ja">日本語</option></select></div>
         <button id="saveSettings" class="primary">保存设置</button>
+      </div>
+      <div class="card">
+        <h3>修改密码</h3>
+        <div class="settings-grid">
+          <label><span>当前密码</span><input id="cpOld" type="password" autocomplete="current-password"></label>
+          <label><span>新密码（至少 8 位）</span><input id="cpNew" type="password" autocomplete="new-password"></label>
+          <label><span>确认新密码</span><input id="cpConfirm" type="password" autocomplete="new-password"></label>
+        </div>
+        <button id="cpSubmit" class="primary">修改密码</button>
       </div>
       <div class="card info"><h3>关于</h3><p class="meta">镜像 ghcr.io/jjrexwang/uav-downloader · Web 队列<br>仅限局域网 / VPN 访问 · 同时只下载一部影片</p></div>
     </section>
@@ -174,9 +228,16 @@ textarea{resize:vertical}
 label{font-size:13px;color:var(--mut)}
 .row{display:flex;align-items:center;gap:10px}.row.wrap{flex-wrap:wrap}
 .row input[type="search"]{flex:1;min-width:200px}
-#auth{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.gate{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .auth-card{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:32px;max-width:480px;width:100%}
 .auth-card label{display:block;margin:18px 0 6px}.auth-card .row input{flex:1}
+.auth-card .gate-actions{margin-top:20px}.auth-card .gate-actions .primary{flex:1}
+#fcLogout{margin-top:10px;padding:7px 12px;font-size:13px}
+.user-row{display:flex;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.user-row:last-child{border-bottom:0}
+.user-main{flex:1;min-width:190px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.user-name{font-weight:700}
+.user-row .actions{margin-top:0}
 .notice{color:var(--bad);min-height:22px;margin:12px 0 0}
 #app{display:flex;min-height:100vh}
 #sidebar{width:216px;flex:none;background:var(--bg);border-right:1px solid var(--line);padding:20px 14px;display:flex;flex-direction:column;gap:18px;position:sticky;top:0;height:100vh}
@@ -291,7 +352,8 @@ details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospa
 }'''
 
 JS = r'''"use strict";
-let token = "", session = 0, timer = null, readSeq = 0, busy = false, ppTimer = null;
+let sessionToken = "", session = 0, timer = null, readSeq = 0, busy = false, ppTimer = null;
+let me = null, loginPassword = "";  // loginPassword only bridges login -> forced change; cleared right after.
 let site = "jable", lastResults = [], libLoaded = false, libFilter = {type: "all", value: ""};
 let settings = {auto_rename: true, file_mode: "preview", lang: "zh-Hans"};
 const $ = id => document.getElementById(id);
@@ -302,17 +364,48 @@ function toast(message) { const t = $("toast"); t.textContent = message; t.class
 async function api(path, body) {
   const requestSession = session;
   const response = await fetch(path, {method: body === undefined ? "GET" : "POST", cache: "no-store", credentials: "omit",
-    headers: {"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+    headers: {"Authorization": "Bearer " + sessionToken, "Content-Type": "application/json"},
     body: body === undefined ? undefined : JSON.stringify(body)});
-  if (response.status === 401) { if (session === requestSession) { disconnect(); toast("令牌不正确或已失效"); } throw new Error("Unauthorized"); }
   const data = await response.json().catch(() => ({}));
+  if (response.status === 401) { if (session === requestSession) { toGate(); toast("登录已失效，请重新登录"); } throw new Error("Unauthorized"); }
+  // Server says the password must be changed before anything else: jump to
+  // the forced-change screen and let callers treat this as an auth failure.
+  if (response.status === 403 && data.error === "must_change_password") { if (session === requestSession) showForceChange(); throw new Error("Unauthorized"); }
   if (!response.ok) throw new Error(data.error || "请求失败");
   return data;
 }
-function disconnect() {
-  session++; readSeq++; token = ""; clearTimeout(timer); clearInterval(ppTimer);
-  $("app").hidden = true; $("auth").hidden = false; $("connect").disabled = false;
+function toGate(notice) {
+  session++; readSeq++; sessionToken = ""; me = null; loginPassword = "";
+  clearTimeout(timer); clearInterval(ppTimer);
+  $("app").hidden = true; $("forceChange").hidden = true; $("onboard").hidden = true;
+  $("auth").hidden = false; $("loginBtn").disabled = false;
+  $("authNotice").textContent = notice || "";
   closePlayer(); libLoaded = false; actLoaded = false;
+}
+async function logout() {
+  const token = sessionToken;
+  toGate();
+  if (token) {
+    try { await fetch("/api/logout", {method: "POST", cache: "no-store", credentials: "omit", headers: {"Authorization": "Bearer " + token, "Content-Type": "application/json"}, body: "{}"}); } catch (error) { /* already at the gate */ }
+  }
+}
+function showForceChange() {
+  $("auth").hidden = true; $("app").hidden = true; $("onboard").hidden = true;
+  $("forceChange").hidden = false;
+  $("fcNew").value = ""; $("fcConfirm").value = ""; $("fcNotice").textContent = "";
+}
+function showOnboard() {
+  $("auth").hidden = true; $("app").hidden = true; $("forceChange").hidden = true;
+  $("onboard").hidden = false;
+  $("obNotice").textContent = "";
+}
+async function enterApp() {
+  $("auth").hidden = true; $("forceChange").hidden = true; $("onboard").hidden = true;
+  $("app").hidden = false;
+  $("connState").textContent = me.username + " · " + (me.role === "admin" ? "管理员" : "普通用户");
+  $("navUsers").hidden = me.role !== "admin";
+  try { const data = await api("/api/queue"); renderQueue(data); timer = setTimeout(refreshQueue, 2000); }
+  catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
 }
 function showView(name) {
   for (const item of document.querySelectorAll(".nav-item")) item.classList.toggle("active", item.dataset.view === name);
@@ -320,6 +413,7 @@ function showView(name) {
   if (name === "library" && !libLoaded) loadLibrary();
   if (name === "actress" && !actLoaded) loadActresses();
   if (name === "settings") loadSettings();
+  if (name === "users") loadUsers();
   if (name === "filing") { loadPlans(); clearInterval(ppTimer); ppTimer = setInterval(loadPlans, 5000); }
   else clearInterval(ppTimer);
   if (name === "organize") loadOrgState();
@@ -367,11 +461,11 @@ function renderQueue(data) {
   }
 }
 async function refreshQueue() {
-  clearTimeout(timer); if (!token) return;
+  clearTimeout(timer); if (!sessionToken) return;
   const id = ++readSeq;
   try { const data = await api("/api/queue"); if (id === readSeq) renderQueue(data); }
   catch (error) { if (id === readSeq && error.message !== "Unauthorized") toast(error.message); }
-  finally { if (token && id === readSeq) timer = setTimeout(refreshQueue, 2000); }
+  finally { if (sessionToken && id === readSeq) timer = setTimeout(refreshQueue, 2000); }
 }
 async function queueAction(path, body) {
   if (busy) return; busy = true;
@@ -449,7 +543,7 @@ function renderLibGrid() {
     const card = node("article", undefined, "work");
     const poster = node("div", undefined, "poster");
     poster.append(node("span", work.code || "—", "code-big"));
-    if (work.cover) { const img = document.createElement("img"); img.alt = ""; img.loading = "lazy"; img.src = "/api/cover?rel=" + encodeURIComponent(work.cover) + "&t=" + encodeURIComponent(token); img.onerror = () => img.remove(); poster.append(img); }
+    if (work.cover) { const img = document.createElement("img"); img.alt = ""; img.loading = "lazy"; img.src = "/api/cover?rel=" + encodeURIComponent(work.cover) + "&t=" + encodeURIComponent(sessionToken); img.onerror = () => img.remove(); poster.append(img); }
     card.append(poster);
     const body = node("div", undefined, "work-body");
     body.append(node("div", work.title || work.code || work.rel, "work-title"));
@@ -476,7 +570,7 @@ function openPlayer(work) {
   $("plTitle").textContent = (work.code ? work.code + " " : "") + (work.title || "");
   $("plInfo").textContent = work.rel + " · " + fmtSize(work.size);
   const video = $("plVideo");
-  video.src = "/api/stream?rel=" + encodeURIComponent(work.rel) + "&t=" + encodeURIComponent(token);
+  video.src = "/api/stream?rel=" + encodeURIComponent(work.rel) + "&t=" + encodeURIComponent(sessionToken);
   $("player").hidden = false;
 }
 function closePlayer() {
@@ -688,6 +782,56 @@ async function loadSettings() {
   try { settings = await api("/api/settings"); renderSettings(); }
   catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
 }
+/* ---------------- users （用户管理，管理员） ---------------- */
+function renderUsers(users) {
+  const box = $("userList"); box.replaceChildren();
+  if (!users.length) { box.append(node("p", "暂无用户。", "meta")); return; }
+  for (const user of users) {
+    const row = node("div", undefined, "user-row");
+    const main = node("div", undefined, "user-main");
+    main.append(node("span", user.username, "user-name"));
+    main.append(node("span", user.role === "admin" ? "管理员" : "普通用户", "tag" + (user.role === "admin" ? " queue" : "")));
+    if (user.must_change) main.append(node("span", "待改密", "tag low"));
+    main.append(node("span", "创建于 " + new Date(user.created * 1000).toLocaleDateString("zh-CN"), "meta"));
+    row.append(main);
+    const actions = node("div", undefined, "actions");
+    const reset = node("button", "重置密码");
+    reset.onclick = async () => {
+      const pw = prompt("为 " + user.username + " 设置临时密码（至少 8 位），对方下次登录必须改密：");
+      if (pw === null) return;
+      try { await api("/api/users/reset", {username: user.username, new_password: pw}); toast("已重置 " + user.username + " 的密码，其现有登录已失效"); loadUsers(); }
+      catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+    };
+    actions.append(reset);
+    const roleBtn = node("button", user.role === "admin" ? "设为普通用户" : "设为管理员");
+    roleBtn.onclick = async () => {
+      const next = user.role === "admin" ? "user" : "admin";
+      if (!confirm("把 " + user.username + " 设为" + (next === "admin" ? "管理员" : "普通用户") + "？")) return;
+      try {
+        await api("/api/users/role", {username: user.username, role: next});
+        if (me && user.username === me.username) { me.role = next; $("navUsers").hidden = next !== "admin"; $("connState").textContent = me.username + " · " + (next === "admin" ? "管理员" : "普通用户"); }
+        toast("已更新 " + user.username + " 的角色");
+        loadUsers();
+      } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+    };
+    actions.append(roleBtn);
+    const del = node("button", "删除");
+    del.disabled = !!me && user.username === me.username;
+    del.title = del.disabled ? "不能删除当前登录的账号" : "";
+    del.onclick = async () => {
+      if (!confirm("确定删除用户 " + user.username + "？此操作不可撤销。")) return;
+      try { await api("/api/users/delete", {username: user.username}); toast("已删除 " + user.username); loadUsers(); }
+      catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+    };
+    actions.append(del);
+    row.append(actions);
+    box.append(row);
+  }
+}
+async function loadUsers() {
+  try { const data = await api("/api/users"); renderUsers(data.users || []); }
+  catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+}
 /* ---------------- wiring ---------------- */
 for (const item of document.querySelectorAll(".nav-item")) item.onclick = () => showView(item.dataset.view);
 for (const chip of document.querySelectorAll("#siteChips .chip")) chip.onclick = () => {
@@ -761,19 +905,80 @@ $("saveSettings").onclick = async () => {
   try { settings = await api("/api/settings", settings); renderSettings(); toast("设置已保存"); }
   catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
 };
-$("disconnect").onclick = disconnect;
-$("connect").onclick = async () => {
-  if ($("connect").disabled) return;
-  const active = ++session; $("connect").disabled = true;
-  token = $("token").value.trim(); $("token").value = "";
+$("disconnect").onclick = () => logout();
+async function doLogin() {
+  if ($("loginBtn").disabled) return;
+  const active = ++session; $("loginBtn").disabled = true;
+  const username = $("loginUser").value.trim();
+  const password = $("loginPass").value; $("loginPass").value = "";
   try {
-    const data = await api("/api/queue");
+    const response = await fetch("/api/login", {method: "POST", cache: "no-store", credentials: "omit",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify({username, password})});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "登录失败");
     if (active !== session) return;
-    $("auth").hidden = true; $("app").hidden = false; $("authNotice").textContent = "";
-    renderQueue(data); timer = setTimeout(refreshQueue, 2000);
+    sessionToken = data.session;
+    me = {username: data.username, role: data.role, must_change: data.must_change};
+    $("authNotice").textContent = "";
+    if (data.must_change) { loginPassword = password; showForceChange(); return; }
+    enterApp();
   } catch (error) {
-    if (active === session) { disconnect(); $("authNotice").textContent = error.message === "Unauthorized" ? "令牌不正确" : error.message; }
-  } finally { if (active === session) $("connect").disabled = false; }
+    if (active === session) $("authNotice").textContent = error.message;
+  } finally { if (active === session) $("loginBtn").disabled = false; }
+}
+$("loginBtn").onclick = doLogin;
+$("loginPass").onkeydown = event => { if (event.key === "Enter") doLogin(); };
+$("loginUser").onkeydown = event => { if (event.key === "Enter") $("loginPass").focus(); };
+$("fcLogout").onclick = () => logout();
+$("fcSubmit").onclick = async () => {
+  const newPw = $("fcNew").value, confirmPw = $("fcConfirm").value;
+  if (newPw.length < 8) { $("fcNotice").textContent = "新密码至少 8 位"; return; }
+  if (newPw !== confirmPw) { $("fcNotice").textContent = "两次输入的新密码不一致"; return; }
+  $("fcSubmit").disabled = true;
+  try {
+    const data = await api("/api/change-password", {old_password: loginPassword, new_password: newPw});
+    loginPassword = ""; $("fcNew").value = ""; $("fcConfirm").value = "";
+    if (me) me.must_change = false;
+    if (data.needs_onboarding) showOnboard(); else enterApp();
+  } catch (error) {
+    if (error.message !== "Unauthorized") $("fcNotice").textContent = error.message;
+  } finally { $("fcSubmit").disabled = false; }
 };
-$("token").onkeydown = event => { if (event.key === "Enter") $("connect").click(); };
+$("fcConfirm").onkeydown = event => { if (event.key === "Enter") $("fcSubmit").click(); };
+$("obSkip").onclick = () => enterApp();
+$("obCreate").onclick = async () => {
+  const username = $("obUser").value.trim(), password = $("obPass").value, role = $("obRole").value;
+  if (!username) { $("obNotice").textContent = "请输入用户名"; return; }
+  if (password.length < 8) { $("obNotice").textContent = "密码至少 8 位"; return; }
+  $("obCreate").disabled = true;
+  try {
+    await api("/api/users", {username, password, role});
+    $("obUser").value = ""; $("obPass").value = "";
+    toast("账号 " + username + " 已创建");
+    enterApp();
+  } catch (error) {
+    if (error.message !== "Unauthorized") $("obNotice").textContent = error.message;
+  } finally { $("obCreate").disabled = false; }
+};
+$("nuCreate").onclick = async () => {
+  const username = $("nuUser").value.trim(), password = $("nuPass").value, role = $("nuRole").value;
+  if (!username) { toast("请输入用户名"); return; }
+  if (password.length < 8) { toast("密码至少 8 位"); return; }
+  try {
+    await api("/api/users", {username, password, role});
+    $("nuUser").value = ""; $("nuPass").value = "";
+    toast("用户 " + username + " 已创建");
+    loadUsers();
+  } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+};
+$("cpSubmit").onclick = async () => {
+  const oldPw = $("cpOld").value, newPw = $("cpNew").value, confirmPw = $("cpConfirm").value;
+  if (newPw.length < 8) { toast("新密码至少 8 位"); return; }
+  if (newPw !== confirmPw) { toast("两次输入的新密码不一致"); return; }
+  try {
+    await api("/api/change-password", {old_password: oldPw, new_password: newPw});
+    $("cpOld").value = ""; $("cpNew").value = ""; $("cpConfirm").value = "";
+    toast("密码已修改");
+  } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+};
 '''

@@ -1,6 +1,4 @@
 """Small same-origin authenticated HTTP surface, deliberately not a file server."""
-import hashlib
-import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -9,7 +7,7 @@ import threading
 from urllib.parse import parse_qs, urlsplit
 
 from uav_downloader.core.storage import StorageWriteError
-from . import actress, library, organize, postprocess, searchsvc
+from . import actress, auth, library, organize, postprocess, searchsvc
 from .ui import HTML, CSS, JS
 
 
@@ -42,14 +40,9 @@ IMAGE_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
                '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif'}
 QUERY_GET_PATHS = {'/api/search', '/api/library', '/api/settings',
                    '/api/stream', '/api/cover'}
-
-
-def validate_token(value):
-    # A length check cannot prove randomness; documentation mandates secrets.token_urlsafe.
-    if (not isinstance(value, str) or not 32 <= len(value) <= 256
-            or len(set(value)) < 12 or not re.fullmatch(r'[A-Za-z0-9_-]+', value)):
-        raise ValueError('UAV_WEB_TOKEN must be a random URL-safe token of at least 32 characters')
-    return value
+# While an account still has must_change set, only these paths stay usable:
+# the forced password-change flow and its escape hatch.
+MUST_CHANGE_ALLOWED = {'/api/me', '/api/change-password', '/api/logout'}
 
 
 class BoundedServer(ThreadingHTTPServer):
@@ -78,8 +71,8 @@ class BoundedServer(ThreadingHTTPServer):
             self.slots.release()
 
 
-def make_server(host, port, token, queue, allowed_hosts=None):
-    digest = hashlib.sha256(validate_token(token).encode()).digest()
+def make_server(host, port, queue, allowed_hosts=None):
+    auth.ensure_bootstrap()  # First run: create the default admin account.
     settings_path = os.path.join(
         os.environ.get('UAV_WEB_STATE_DIR', '/state'), 'settings.json')
 
@@ -127,6 +120,8 @@ def make_server(host, port, token, queue, allowed_hosts=None):
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.0'
+        current_user = None      # Safe user dict, set by _auth/_auth_media.
+        current_session = None   # Session token backing this request.
 
         def setup(self):
             super().setup()
@@ -175,29 +170,163 @@ def make_server(host, port, token, queue, allowed_hosts=None):
                     return False
             return True
 
-        def _token_ok(self, supplied):
-            return hmac.compare_digest(
-                hashlib.sha256((supplied or '').encode()).digest(), digest)
+        def _finish_auth(self, user, session_token):
+            """Record who is calling; enforce the forced password change."""
+            self.current_user = user
+            self.current_session = session_token
+            path = self.path.split('?', 1)[0].split('#', 1)[0]
+            if user['must_change'] and path not in MUST_CHANGE_ALLOWED:
+                self._send(403, {'error': 'must_change_password'})
+                return False
+            return True
 
         def _auth(self):
             values = self.headers.get_all('Authorization', [])
             value = values[0] if len(values) == 1 else ''
             supplied = value[7:] if value.startswith('Bearer ') else ''
-            if not self._token_ok(supplied):
+            user = auth.lookup_session(supplied) if supplied else None
+            if user is None:
                 self._send(401, {'error': 'Authentication required'})
+                return False
+            return self._finish_auth(user, supplied)
+
+        def _auth_media(self, params):
+            # Media elements cannot set headers, so accept ?t=<session> too.
+            values = self.headers.get_all('Authorization', [])
+            supplied = ''
+            if len(values) == 1 and values[0].startswith('Bearer '):
+                supplied = values[0][7:]
+            if not supplied:
+                supplied = params.get('t', [''])[0]
+            user = auth.lookup_session(supplied) if supplied else None
+            if user is None:
+                self._send(401, {'error': 'Authentication required'})
+                return False
+            return self._finish_auth(user, supplied)
+
+        def _require_admin(self):
+            if not self.current_user or self.current_user.get('role') != 'admin':
+                self._send(403, {'error': '需要管理员权限'})
                 return False
             return True
 
-        def _auth_media(self, params):
-            # Media elements cannot set headers, so accept ?t=<token> as well.
-            values = self.headers.get_all('Authorization', [])
-            if (len(values) == 1 and values[0].startswith('Bearer ')
-                    and self._token_ok(values[0][7:])):
-                return True
-            if self._token_ok(params.get('t', [''])[0]):
-                return True
-            self._send(401, {'error': 'Authentication required'})
-            return False
+        def _do_login(self, data):
+            if (set(data) != {'username', 'password'}
+                    or not isinstance(data['username'], str)
+                    or not isinstance(data['password'], str)):
+                self._send(400, {'error': 'Expected username and password'})
+                return
+            username = data['username'].strip()
+            remaining = auth.lock_remaining(username)
+            if remaining > 0:
+                minutes = max(1, -(-remaining // 60))
+                self._send(429, {'error': f'尝试次数过多，请 {minutes} 分钟后重试'})
+                return
+            user = auth.authenticate(username, data['password'])
+            if user is None:
+                auth.record_failure(username)
+                self._send(401, {'error': '用户名或密码不正确'})
+                return
+            auth.record_success(username)
+            self._send(200, {'session': auth.create_session(username),
+                             'username': user['username'],
+                             'role': user['role'],
+                             'must_change': user['must_change']})
+
+        def _do_change_password(self, data):
+            if (set(data) != {'old_password', 'new_password'}
+                    or not isinstance(data['old_password'], str)
+                    or not isinstance(data['new_password'], str)):
+                self._send(400, {'error': 'Expected old_password and new_password'})
+                return
+            username = self.current_user['username']
+            if not auth.check_password(username, data['old_password']):
+                self._send(401, {'error': '当前密码不正确'})
+                return
+            if not auth.password_ok(data['new_password']):
+                self._send(400, {'error': '新密码至少 8 位'})
+                return
+            auth.set_password(username, data['new_password'], must_change=False)
+            self.current_user['must_change'] = False
+            needs_onboarding = (self.current_user['role'] == 'admin'
+                                and auth.user_count() == 1)
+            self._send(200, {'ok': True, 'needs_onboarding': needs_onboarding})
+
+        def _do_create_user(self, data):
+            if (not set(data) <= {'username', 'password', 'role'}
+                    or not isinstance(data.get('username'), str)
+                    or not isinstance(data.get('password'), str)):
+                self._send(400, {'error': 'Expected username and password'})
+                return
+            username = data['username'].strip()
+            role = data.get('role', 'user')
+            if not auth.valid_username(username):
+                self._send(400, {'error': '用户名需为 1-32 个字符（字母、数字、_ . -）'})
+                return
+            if role not in ('admin', 'user'):
+                self._send(400, {'error': '角色不正确'})
+                return
+            if not auth.password_ok(data['password']):
+                self._send(400, {'error': '密码至少 8 位'})
+                return
+            if auth.get_user(username) is not None:
+                self._send(409, {'error': '用户名已存在'})
+                return
+            user = auth.create_user(username, data['password'], role)
+            self._send(200, {'ok': True, 'user': user})
+
+        def _do_user_admin(self, data):
+            """POST /api/users/reset | /api/users/delete | /api/users/role."""
+            if self.path == '/api/users/reset':
+                if (set(data) != {'username', 'new_password'}
+                        or not isinstance(data['username'], str)
+                        or not isinstance(data['new_password'], str)):
+                    self._send(400, {'error': 'Expected username and new_password'})
+                    return
+                if auth.get_user(data['username']) is None:
+                    self._send(404, {'error': '用户不存在'})
+                    return
+                if not auth.password_ok(data['new_password']):
+                    self._send(400, {'error': '新密码至少 8 位'})
+                    return
+                auth.set_password(data['username'], data['new_password'],
+                                  must_change=True)
+                auth.revoke_user_sessions(data['username'])
+                self._send(200, {'ok': True})
+                return
+            if self.path == '/api/users/delete':
+                if set(data) != {'username'} or not isinstance(data['username'], str):
+                    self._send(400, {'error': 'Expected username'})
+                    return
+                target = auth.get_user(data['username'])
+                if target is None:
+                    self._send(404, {'error': '用户不存在'})
+                    return
+                if data['username'] == self.current_user['username']:
+                    self._send(400, {'error': '不能删除当前登录的账号'})
+                    return
+                if target['role'] == 'admin' and auth.admin_count() <= 1:
+                    self._send(400, {'error': '不能删除最后一个管理员'})
+                    return
+                auth.delete_user(data['username'])
+                self._send(200, {'ok': True})
+                return
+            # /api/users/role
+            if (set(data) != {'username', 'role'}
+                    or not isinstance(data['username'], str)
+                    or data['role'] not in ('admin', 'user')):
+                self._send(400, {'error': 'Expected username and role'})
+                return
+            target = auth.get_user(data['username'])
+            if target is None:
+                self._send(404, {'error': '用户不存在'})
+                return
+            if (target['role'] == 'admin' and data['role'] == 'user'
+                    and auth.admin_count() <= 1):
+                self._send(400, {'error': '不能取消最后一个管理员的管理员权限'})
+                return
+            auth.set_role(data['username'], data['role'])
+            self._send(200, {'ok': True})
 
         def _handle_library(self):
             works = library.scan_library()
@@ -321,6 +450,12 @@ def make_server(host, port, token, queue, allowed_hosts=None):
                     self._send(200, *static[self.path])
             elif self.path == '/api/queue' and self._auth():
                 self._send(200, queue.snapshot())
+            elif self.path == '/api/me':
+                if self._auth():
+                    self._send(200, self.current_user)
+            elif self.path == '/api/users':
+                if self._auth() and self._require_admin():
+                    self._send(200, {'users': auth.list_users()})
             elif self.path == '/api/actress/list':
                 if self._auth():
                     self._send(200, {'actresses': actress.library_actresses()})
@@ -334,7 +469,7 @@ def make_server(host, port, token, queue, allowed_hosts=None):
                 self._send(404, {'error': 'Not found'})
 
         def do_POST(self):
-            if not self._guard() or not self._auth():
+            if not self._guard():
                 return
             try:
                 lengths = self.headers.get_all('Content-Length', [])
@@ -352,6 +487,27 @@ def make_server(host, port, token, queue, allowed_hosts=None):
                 data = json.loads(raw.decode('utf-8'))
                 if not isinstance(data, dict):
                     raise ValueError('Expected an object')
+                if self.path == '/api/login':
+                    self._do_login(data)
+                    return
+                if not self._auth():
+                    return
+                if self.path == '/api/logout':
+                    auth.revoke_session(self.current_session)
+                    self._send(200, {'ok': True})
+                    return
+                if self.path == '/api/change-password':
+                    self._do_change_password(data)
+                    return
+                if self.path == '/api/users':
+                    if self._require_admin():
+                        self._do_create_user(data)
+                    return
+                if self.path in ('/api/users/reset', '/api/users/delete',
+                                  '/api/users/role'):
+                    if self._require_admin():
+                        self._do_user_admin(data)
+                    return
                 if self.path == '/api/queue':
                     if set(data) != {'jobs'}:
                         raise ValueError('Expected only jobs')
