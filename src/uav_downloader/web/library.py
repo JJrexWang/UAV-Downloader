@@ -24,7 +24,7 @@ BUCKETS = {'共演·合集', 'FC2', '素人'}
 CACHE_SECONDS = 60
 
 _lock = threading.Lock()
-_cache = {'at': 0.0, 'works': None, 'dl_codes': None}
+_cache = {'at': 0.0, 'works': None, 'tree': None, 'dl_codes': None}
 
 
 def library_root():
@@ -145,8 +145,10 @@ def scan_library():
         if _cache['works'] is not None and _fresh(_cache['at']):
             return list(_cache['works'])
     works = _scan()
+    tree = _build_tree(works)
     with _lock:
         _cache['works'] = works
+        _cache['tree'] = tree
         _cache['at'] = time.time()
     return list(works)
 
@@ -155,8 +157,118 @@ def invalidate_cache():
     """Drop the scan caches (e.g. after a backfill filing changed the tree)."""
     with _lock:
         _cache['works'] = None
+        _cache['tree'] = None
         _cache['dl_codes'] = None
         _cache['at'] = 0.0
+
+
+def _build_tree(works):
+    """Directory index derived from the flat works list.
+
+    Maps every directory rel-path ('' is the library root) to its direct
+    works, its immediate subdirectories and its recursive video count.
+    Ancestor directories appear even when they hold no works directly.
+    """
+    nodes = {'': {'direct': [], 'subdirs': {}, 'total': 0}}
+
+    def ensure(rel):
+        node = nodes.get(rel)
+        if node is None:
+            node = nodes[rel] = {'direct': [], 'subdirs': {}, 'total': 0}
+        return node
+
+    for work in works:
+        dir_rel = work['rel'].rsplit('/', 1)[0] if '/' in work['rel'] else ''
+        segments = dir_rel.split('/') if dir_rel else []
+        prefix = ''
+        ensure('')
+        for segment in segments:
+            parent = prefix
+            prefix = segment if not prefix else prefix + '/' + segment
+            ensure(prefix)
+            ensure(parent)['subdirs'].setdefault(segment, prefix)
+        ensure(dir_rel)['direct'].append(work)
+        prefix = ''
+        nodes['']['total'] += 1
+        for segment in segments:
+            prefix = segment if not prefix else prefix + '/' + segment
+            nodes[prefix]['total'] += 1
+    return nodes
+
+
+def library_tree():
+    """The cached directory index built alongside the works scan."""
+    scan_library()
+    with _lock:
+        tree = _cache['tree']
+    if tree is None:  # Works were cached before the tree existed; rebuild.
+        tree = _build_tree(scan_library())
+        with _lock:
+            _cache['tree'] = tree
+    return tree
+
+
+def resolve_dir(rel):
+    """Absolute path for a directory *rel* under the library root, else None.
+
+    '' resolves to the root itself.  Absolute inputs, ``..`` escapes and
+    non-directories are rejected.
+    """
+    if not isinstance(rel, str) or Path(rel).is_absolute():
+        return None
+    base = Path(library_root()).resolve()
+    try:
+        target = (base / rel).resolve() if rel else base
+    except (OSError, RuntimeError):
+        return None
+    if target.is_relative_to(base) and target.is_dir():
+        return str(target)
+    return None
+
+
+def tree_view(path):
+    """Payload for GET /api/library/tree, or None when *path* is not a
+    directory inside the library root."""
+    if resolve_dir(path) is None:
+        return None
+    tree = library_tree()
+    node = tree.get(path) or {'direct': [], 'subdirs': {}, 'total': 0}
+    folders = [{'name': name, 'rel': child,
+                'count': tree.get(child, {}).get('total', 0)}
+               for name, child in sorted(node['subdirs'].items())]
+    crumbs = [{'name': '片库', 'rel': ''}]
+    if path:
+        prefix = ''
+        for segment in path.split('/'):
+            prefix = segment if not prefix else prefix + '/' + segment
+            crumbs.append({'name': segment, 'rel': prefix})
+    return {'path': path, 'crumbs': crumbs, 'folders': folders,
+            'works': list(node['direct'])}
+
+
+def actress_dirs():
+    """Actress folders under 01-日本JAV: [{name, dir, count}], count desc.
+
+    *name* is the cleaned display name; when several folders clean to the
+    same name, *dir* is the one holding the most works and *count* is the
+    merged total across all of them.
+    """
+    grouped = {}
+    for work in scan_library():
+        if work.get('folder') == TOP_JAV and work.get('actress_dir'):
+            dir_rel = TOP_JAV + '/' + work['actress_dir']
+            name = work.get('actress') or clean_actress_name(work['actress_dir'])
+            if not name:
+                continue
+            per_dir = grouped.setdefault(name, {})
+            per_dir[dir_rel] = per_dir.get(dir_rel, 0) + 1
+    out = []
+    for name, per_dir in grouped.items():
+        best_dir = max(per_dir.items(), key=lambda item: item[1])[0]
+        out.append({'name': name, 'dir': best_dir,
+                    'count': sum(per_dir.values())})
+    out.sort(key=lambda entry: (-entry['count'], entry['name']))
+    return out
 
 
 def code_index():

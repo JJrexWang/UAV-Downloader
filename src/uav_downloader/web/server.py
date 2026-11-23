@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from uav_downloader.core.storage import StorageWriteError
 from . import actress, auth, backfill, library, metadata, organize
-from . import postprocess, searchsvc
+from . import postprocess, searchsvc, thumbs
 from .ui import HTML, CSS, JS
 
 
@@ -39,8 +39,9 @@ VIDEO_TYPES = {'.mp4': 'video/mp4', '.mkv': 'video/x-matroska',
                '.m2ts': 'video/mp2t', '.webm': 'video/webm'}
 IMAGE_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
                '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif'}
-QUERY_GET_PATHS = {'/api/search', '/api/library', '/api/settings',
-                   '/api/stream', '/api/cover'}
+QUERY_GET_PATHS = {'/api/search', '/api/library', '/api/library/tree',
+                   '/api/library/actresses', '/api/settings',
+                   '/api/stream', '/api/cover', '/api/thumb'}
 # While an account still has must_change set, only these paths stay usable:
 # the forced password-change flow and its escape hatch.
 MUST_CHANGE_ALLOWED = {'/api/me', '/api/change-password', '/api/logout'}
@@ -398,6 +399,40 @@ def make_server(host, port, queue, allowed_hosts=None):
                 'actresses': sorted({w['actress'] for w in works if w['actress']}),
                 'folders': sorted({w['folder'] for w in works if w['folder']})})
 
+        def _handle_library_tree(self, params):
+            path = params.get('path', [''])[0].strip().strip('/')
+            if path == '.':
+                path = ''
+            view = library.tree_view(path)
+            if view is None:
+                self._send(404, {'error': '目录不存在'})
+                return
+            self._send(200, view)
+
+        def _handle_thumb(self, params):
+            rel = params.get('rel', [''])[0]
+            try:
+                cached = thumbs.get_thumb(rel)
+            except thumbs.ThumbBusy:
+                self._send(503, {'error': '预览图生成繁忙，请稍后重试'})
+                return
+            if cached is None:
+                self._send(404, {'error': 'Not found'})
+                return
+            try:
+                payload = cached.read_bytes()
+            except OSError:
+                self._send(404, {'error': 'Not found'})
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/jpeg')
+            self.send_header('Content-Length', str(len(payload)))
+            self.send_header('Cache-Control', 'private, max-age=86400')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.end_headers()
+            self.wfile.write(payload)
+
         def _handle_search(self, params):
             query = params.get('q', [''])[0].strip()
             site = params.get('site', ['jable'])[0].strip().lower() or 'jable'
@@ -492,9 +527,18 @@ def make_server(host, port, queue, allowed_hosts=None):
                 if path in ('/api/stream', '/api/cover'):
                     if self._auth_media(params):
                         self._handle_media(path, params)
+                elif path == '/api/thumb':
+                    if self._auth_media(params):
+                        self._handle_thumb(params)
                 elif path == '/api/library':
                     if self._auth():
                         self._handle_library()
+                elif path == '/api/library/tree':
+                    if self._auth():
+                        self._handle_library_tree(params)
+                elif path == '/api/library/actresses':
+                    if self._auth():
+                        self._send(200, {'actresses': library.actress_dirs()})
                 elif path == '/api/search':
                     if self._auth():
                         self._handle_search(params)

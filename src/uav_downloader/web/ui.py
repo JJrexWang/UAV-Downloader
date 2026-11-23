@@ -97,14 +97,13 @@ HTML = '''<!doctype html>
       <div class="section-head"><h2>我的片库</h2><button id="libRefresh">刷新</button></div>
       <div class="picker" id="actPicker">
         <div class="row">
-          <input id="libActSearch" type="search" placeholder="输入女优名筛选…" autocomplete="off">
+          <input id="libActSearch" type="search" placeholder="输入女优名，点选后进入她的目录…" autocomplete="off">
           <button id="libActAll">全部女优</button>
         </div>
-        <div id="libActSel"></div>
         <div id="libActList" class="picker-list" hidden></div>
       </div>
-      <div class="chips" id="libChips"></div>
-      <button id="libChipsToggle" class="ghost chips-toggle" hidden>展开</button>
+      <nav id="libCrumbs" class="crumbs" aria-label="当前位置"></nav>
+      <div id="libFolders" class="grid lib-grid"></div>
       <div id="libGrid" class="grid lib-grid"></div>
     </section>
     <section id="view-queue" class="view" hidden>
@@ -375,8 +374,17 @@ details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospa
 #backfillRow{margin-top:10px}
 .picker{position:relative;margin-bottom:12px}
 .picker .row input[type="search"]{flex:1;min-width:200px}
-#libActSel{margin-top:10px}
-#libActSel:empty{margin-top:0}
+.crumbs{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:4px}
+.crumbs button{background:transparent;border:0;padding:5px 7px;color:var(--mut);font-weight:600;border-radius:6px}
+.crumbs button:hover{background:var(--s2);color:var(--on)}
+.crumbs button.current{color:var(--on);cursor:default}
+.crumbs button.current:hover{background:transparent;color:var(--on)}
+.crumbs .sep{color:var(--dim);font-size:13px}
+.folder-card{cursor:pointer}
+.folder-card:hover{border-color:var(--s4)}
+.folder-poster{background:linear-gradient(135deg,var(--s2),var(--s1))}
+.folder-glyph{display:flex;align-items:center;justify-content:center}
+.lib-more{grid-column:1/-1;padding:13px}
 .sel-chip{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:7px 8px 7px 14px;background:var(--pri);color:var(--onpri);border:1px solid var(--pri);font-size:13px;font-weight:600}
 .sel-chip button{background:rgba(0,0,0,.18);border:0;color:inherit;border-radius:50%;width:20px;height:20px;padding:0;display:flex;align-items:center;justify-content:center;font-size:12px}
 .picker-list{position:absolute;left:0;right:0;top:100%;margin-top:6px;background:var(--s2);border:1px solid var(--line);border-radius:10px;max-height:264px;overflow:auto;z-index:30;box-shadow:0 10px 30px rgba(0,0,0,.4)}
@@ -385,8 +393,6 @@ details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospa
 .picker-item:hover{background:var(--s3)}
 .picker-item .cnt{color:var(--dim);font-size:12px;font-weight:400;flex:none}
 .picker-empty{padding:12px 14px;color:var(--dim);font-size:13px}
-#libChips.clamped{max-height:86px;overflow:hidden}
-.chips-toggle{margin-top:8px;padding:6px 12px;font-size:13px}
 .qgroup{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:14px;cursor:pointer}
 .qgroup:hover{border-color:var(--s4);background:var(--s1)}
 .qgroup progress{margin:12px 0 0}
@@ -425,7 +431,7 @@ details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospa
 JS = r'''"use strict";
 let sessionToken = "", session = 0, timer = null, readSeq = 0, busy = false, ppTimer = null;
 let me = null, loginPassword = "";  // loginPassword only bridges login -> forced change; cleared right after.
-let site = "jable", lastResults = [], lastQuery = "", libLoaded = false, libFilter = {type: "all", value: ""};
+let site = "jable", lastResults = [], lastQuery = "", libLoaded = false;
 let queueActress = null, queueData = null;  // queueActress: null = group list, "" = 未分类 group, else actress name
 let bfPlan = null, bfSel = new Set(), bfBusy = false;
 let settings = {auto_rename: true, file_mode: "preview", lang: "zh-Hans"};
@@ -455,6 +461,8 @@ function toGate(notice) {
   $("auth").hidden = false; $("loginBtn").disabled = false;
   $("authNotice").textContent = notice || "";
   closePlayer(); libLoaded = false; actLoaded = false;
+  disconnectMediaObserver();
+  libPath = ""; libShowAll = false; libTreeData = null; libActData = []; libActLoaded = false;
 }
 async function logout() {
   const token = sessionToken;
@@ -485,6 +493,7 @@ function showView(name) {
   for (const item of document.querySelectorAll(".nav-item")) item.classList.toggle("active", item.dataset.view === name);
   for (const view of document.querySelectorAll(".view")) view.hidden = view.id !== "view-" + name;
   $("content").classList.toggle("wide", name === "library" || name === "actress");
+  if (name !== "library") disconnectMediaObserver();
   if (name === "library" && !libLoaded) loadLibrary();
   if (name === "actress" && !actLoaded) loadActresses();
   if (name === "settings") loadSettings();
@@ -730,87 +739,164 @@ function fmtSize(bytes) {
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return v.toFixed(v >= 100 ? 0 : 1) + " " + units[i];
 }
-let libWorks = [], libActresses = [], libFolders = [], libChipsOpen = false;
-function renderLibChips() {
-  const chips = $("libChips"); chips.replaceChildren();
-  const add = (label, type, value) => {
-    const b = node("button", label, "chip" + (libFilter.type === type && libFilter.value === value ? " active" : ""));
-    b.onclick = () => { libFilter = {type, value}; renderLibChips(); renderActSel(); renderLibGrid(); };
-    chips.append(b);
-  };
-  add("全部", "all", "");
-  for (const name of libFolders) add(name, "folder", name);
-  chips.classList.toggle("clamped", !libChipsOpen);
-  requestAnimationFrame(() => { $("libChipsToggle").hidden = chips.scrollHeight <= 90; });
-  $("libChipsToggle").textContent = libChipsOpen ? "收起" : "展开";
+let libPath = "", libShowAll = false, libTreeData = null;
+let libActData = [], libActLoaded = false;
+const LIB_RENDER_CAP = 300;
+function folderGlyph() {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "52");
+  svg.setAttribute("height", "52");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("d", "M3 5.5A1.5 1.5 0 0 1 4.5 4h5l2 2.5h7A1.5 1.5 0 0 1 20 8v10.5a1.5 1.5 0 0 1-1.5 1.5h-14A1.5 1.5 0 0 1 3 18.5v-13Z");
+  path.setAttribute("fill", "var(--pri)");
+  path.setAttribute("opacity", ".9");
+  svg.append(path);
+  return svg;
 }
-function actressCounts() {
-  const counts = {};
-  for (const w of libWorks) if (w.actress) counts[w.actress] = (counts[w.actress] || 0) + 1;
-  return counts;
+/* Lazy media: a card's cover (or its server-generated preview frame) is
+   requested only when the card approaches the viewport, so opening a big
+   folder never fires hundreds of image requests at once. */
+let mediaObserver = null;
+function disconnectMediaObserver() {
+  if (mediaObserver) { mediaObserver.disconnect(); mediaObserver = null; }
 }
-function renderActSel() {
-  const box = $("libActSel"); box.replaceChildren();
-  if (libFilter.type !== "actress") return;
-  const chip = node("span", undefined, "sel-chip");
-  chip.append(node("span", libFilter.value));
-  const x = node("button", "✕"); x.title = "清除女优筛选";
-  x.onclick = () => { libFilter = {type: "all", value: ""}; renderLibChips(); renderActSel(); renderLibGrid(); };
-  chip.append(x);
-  box.append(chip);
+function ensureMediaObserver() {
+  if (mediaObserver) return mediaObserver;
+  mediaObserver = new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const poster = entry.target;
+      mediaObserver.unobserve(poster);
+      const cover = poster.dataset.cover || "", rel = poster.dataset.rel || "";
+      const img = document.createElement("img");
+      img.alt = "";
+      img.src = cover
+        ? "/api/cover?rel=" + encodeURIComponent(cover) + "&t=" + encodeURIComponent(sessionToken)
+        : "/api/thumb?rel=" + encodeURIComponent(rel) + "&t=" + encodeURIComponent(sessionToken);
+      img.onerror = () => img.remove();
+      poster.append(img);
+    }
+  }, {rootMargin: "300px"});
+  return mediaObserver;
+}
+function libWorkCard(work) {
+  const card = node("article", undefined, "work");
+  const poster = node("div", undefined, "poster");
+  poster.append(node("span", work.code || "—", "code-big"));
+  poster.dataset.cover = work.cover_rel || "";
+  poster.dataset.rel = work.rel || "";
+  card.append(poster);
+  const body = node("div", undefined, "work-body");
+  body.append(node("div", work.title || work.code || work.rel, "work-title"));
+  const meta = node("div", undefined, "work-meta");
+  if (work.code) meta.append(node("span", work.code));
+  if (work.actress) meta.append(node("span", work.actress));
+  meta.append(node("span", fmtSize(work.size)));
+  body.append(meta);
+  const btn = node("button", "播放", "primary");
+  btn.onclick = () => openPlayer(work);
+  body.append(btn); card.append(body);
+  ensureMediaObserver().observe(poster);
+  return card;
+}
+function libFolderCard(folder) {
+  const card = node("article", undefined, "work folder-card");
+  const poster = node("div", undefined, "poster folder-poster");
+  const glyph = node("span", undefined, "folder-glyph");
+  glyph.append(folderGlyph());
+  poster.append(glyph);
+  card.append(poster);
+  const body = node("div", undefined, "work-body");
+  body.append(node("div", folder.name, "work-title"));
+  const meta = node("div", undefined, "work-meta");
+  meta.append(node("span", folder.count + " 部"));
+  body.append(meta);
+  card.append(body);
+  card.onclick = () => navigateLib(folder.rel);
+  return card;
+}
+function renderCrumbs(crumbs) {
+  const bar = $("libCrumbs"); bar.replaceChildren();
+  (crumbs || []).forEach((crumb, i, all) => {
+    if (i) bar.append(node("span", "›", "sep"));
+    const last = i === all.length - 1;
+    const b = node("button", crumb.name, last ? "current" : "");
+    if (!last) b.onclick = () => navigateLib(crumb.rel);
+    bar.append(b);
+  });
+}
+function renderLibTree() {
+  const data = libTreeData; if (!data) return;
+  renderCrumbs(data.crumbs);
+  const folders = data.folders || [], works = data.works || [];
+  const fbox = $("libFolders"); fbox.replaceChildren();
+  fbox.hidden = !folders.length;
+  for (const folder of folders) fbox.append(libFolderCard(folder));
+  const grid = $("libGrid"); grid.replaceChildren();
+  if (!folders.length && !works.length) {
+    const e = node("div", undefined, "empty");
+    e.append(node("h3", "空目录"), node("p", "这个文件夹里还没有子文件夹或视频。"));
+    grid.append(e);
+    return;
+  }
+  const shown = libShowAll ? works : works.slice(0, LIB_RENDER_CAP);
+  for (const work of shown) grid.append(libWorkCard(work));
+  if (!libShowAll && works.length > LIB_RENDER_CAP) {
+    const more = node("button", "显示全部（共 " + works.length + " 部）", "lib-more");
+    more.onclick = () => {
+      libShowAll = true; more.remove();
+      for (const work of works.slice(LIB_RENDER_CAP)) grid.append(libWorkCard(work));
+    };
+    grid.append(more);
+  }
+}
+async function loadLibraryTree() {
+  disconnectMediaObserver();
+  try {
+    const data = await api("/api/library/tree?path=" + encodeURIComponent(libPath));
+    libTreeData = data;
+    libPath = data.path || "";
+    libLoaded = true;
+    renderLibTree();
+  } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+}
+function navigateLib(path) {
+  libPath = path || "";
+  libShowAll = false;
+  loadLibraryTree().then(() => { const v = $("view-library"); if (v) v.scrollIntoView(); });
+}
+async function loadLibActresses() {
+  if (libActLoaded) return;
+  try {
+    const data = await api("/api/library/actresses");
+    libActData = data.actresses || [];
+    libActLoaded = true;
+  } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
 }
 function renderActPicker() {
   const list = $("libActList");
   const q = $("libActSearch").value.trim().toLowerCase();
-  const counts = actressCounts();
-  const names = libActresses.filter(name => !q || name.toLowerCase().includes(q));
+  const matches = libActData.filter(a => !q || a.name.toLowerCase().includes(q));
   list.replaceChildren();
-  if (!names.length) list.append(node("div", "没有匹配的女优", "picker-empty"));
-  for (const name of names.slice(0, 200)) {
+  if (!matches.length) list.append(node("div", "没有匹配的女优", "picker-empty"));
+  for (const a of matches.slice(0, 200)) {
     const b = node("button", undefined, "picker-item");
-    b.append(node("span", name), node("span", "库内 " + (counts[name] || 0) + " 部", "cnt"));
+    b.append(node("span", a.name), node("span", "库内 " + a.count + " 部", "cnt"));
     b.onclick = () => {
-      libFilter = {type: "actress", value: name};
       $("libActSearch").value = "";
       list.hidden = true;
-      renderLibChips(); renderActSel(); renderLibGrid();
+      navigateLib(a.dir);
     };
     list.append(b);
   }
   list.hidden = false;
 }
-function renderLibGrid() {
-  const grid = $("libGrid"); grid.replaceChildren();
-  const works = libWorks.filter(w =>
-    libFilter.type === "all" ? true :
-    libFilter.type === "actress" ? w.actress === libFilter.value : w.folder === libFilter.value);
-  if (!works.length) { const e = node("div", undefined, "empty"); e.append(node("h3", "片库是空的"), node("p", "这个分类下还没有视频。")); grid.append(e); return; }
-  for (const work of works) {
-    const card = node("article", undefined, "work");
-    const poster = node("div", undefined, "poster");
-    poster.append(node("span", work.code || "—", "code-big"));
-    if (work.cover_rel) { const img = document.createElement("img"); img.alt = ""; img.loading = "lazy"; img.src = "/api/cover?rel=" + encodeURIComponent(work.cover_rel) + "&t=" + encodeURIComponent(sessionToken); img.onerror = () => img.remove(); poster.append(img); }
-    card.append(poster);
-    const body = node("div", undefined, "work-body");
-    body.append(node("div", work.title || work.code || work.rel, "work-title"));
-    const meta = node("div", undefined, "work-meta");
-    if (work.code) meta.append(node("span", work.code));
-    if (work.actress) meta.append(node("span", work.actress));
-    meta.append(node("span", fmtSize(work.size)));
-    body.append(meta);
-    const btn = node("button", "播放", "primary");
-    btn.onclick = () => openPlayer(work);
-    body.append(btn); card.append(body);
-    grid.append(card);
-  }
-}
 async function loadLibrary() {
-  try {
-    const data = await api("/api/library");
-    libWorks = data.works || []; libLoaded = true;
-    libActresses = data.actresses || []; libFolders = data.folders || [];
-    renderLibChips(); renderActSel(); renderLibGrid();
-  } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
+  loadLibActresses();
+  await loadLibraryTree();
 }
 /* ---------------- player ---------------- */
 function openPlayer(work) {
@@ -1103,7 +1189,7 @@ $("add").onclick = async () => {
 };
 $("clear").onclick = () => queueAction("/api/clear", {});
 $("resume").onclick = () => { if (confirm("已确认磁盘健康及剩余空间？")) queueAction("/api/resume", {}); };
-$("libRefresh").onclick = () => { libLoaded = false; loadLibrary(); };
+$("libRefresh").onclick = () => { libActLoaded = false; loadLibrary(); };
 $("queueBack").onclick = () => { queueActress = null; if (queueData) renderQueue(queueData); };
 $("backfillBtn").onclick = openBackfill;
 $("bfClose").onclick = closeBackfill;
@@ -1115,11 +1201,9 @@ $("libActSearch").oninput = () => renderActPicker();
 $("libActSearch").onfocus = () => renderActPicker();
 $("libActSearch").onkeydown = event => { if (event.key === "Escape") $("libActList").hidden = true; };
 $("libActAll").onclick = () => {
-  libFilter = {type: "all", value: ""};
   $("libActSearch").value = ""; $("libActList").hidden = true;
-  renderLibChips(); renderActSel(); renderLibGrid();
+  navigateLib("");
 };
-$("libChipsToggle").onclick = () => { libChipsOpen = !libChipsOpen; renderLibChips(); };
 document.addEventListener("mousedown", event => {
   if (!$("actPicker").contains(event.target)) $("libActList").hidden = true;
 });
