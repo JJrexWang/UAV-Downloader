@@ -13,6 +13,8 @@ _CODE_RE = re.compile(r'[A-Za-z]{2,6}-?\d{2,5}')
 _CODE_PARTS = re.compile(r'([A-Za-z]{2,6})-?(\d{2,5})')
 _SLUG_CODE = re.compile(r'([A-Za-z]+)-(\d+)')
 SITES = ('jable', 'missav', 'supjav')
+_MAX_PAGES = 10  # Hard cap on pages fetched per search (all sites).
+_JABLE_PAGE_SIZE = 24  # JableTVList.totalPages is derived with 24 per page.
 
 
 def _normalize_code(raw):
@@ -44,47 +46,132 @@ def _code_from_title(title):
 
 def _search_jable(query):
     from uav_downloader.sites.jabletv import JableTVList
-    listing = JableTVList('https://jable.tv/search/?q=' + quote(query, safe=''),
+    # Path-style search URL: JableTVList parses the keyword out of the path
+    # (url.split('/')[4]) and needs it to build page 2+ URLs; the '?q=' form
+    # leaves searchKeyWord as '?q=...' and breaks pagination.
+    listing = JableTVList('https://jable.tv/search/' + quote(query, safe='') + '/',
                           silence=True)
     if getattr(listing, 'islist', None) is None:
         raise RuntimeError('Jable 未返回列表（站点不可达或被拦截）')
-    links = getattr(listing, 'links', None) or []
-    descriptions = getattr(listing, 'linkDescriptions', None) or []
-    try:
-        thumbnails = listing.getThumbnails() or []
-    except Exception:
-        thumbnails = []
-    results = [{'url': url,
-                'title': descriptions[i] if i < len(descriptions) else '',
-                'thumbnail': thumbnails[i] if i < len(thumbnails) else '',
-                'duration': '',
-                'code': _code_from_slug(url)}
-               for i, url in enumerate(links)]
-    total = getattr(listing, 'totalLinks', 0) or len(results)
+    results = []
+    seen = set()
+
+    def collect():
+        """Append the listing's current page; return (page size, added)."""
+        links = getattr(listing, 'links', None) or []
+        descriptions = getattr(listing, 'linkDescriptions', None) or []
+        try:
+            thumbnails = listing.getThumbnails() or []
+        except Exception:
+            thumbnails = []
+        added = 0
+        for i, url in enumerate(links):
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            results.append({'url': url,
+                            'title': descriptions[i] if i < len(descriptions) else '',
+                            'thumbnail': thumbnails[i] if i < len(thumbnails) else '',
+                            'duration': '',
+                            'code': _code_from_slug(url)})
+            added += 1
+        return len(links), added
+
+    page_size, _added = collect()
+    total_pages = int(getattr(listing, 'totalPages', 1) or 1)
+    planned = min(max(total_pages, 1), _MAX_PAGES)
+    sortby = getattr(listing, 'sortType', None)
+    index = 1
+    while index < _MAX_PAGES:
+        if index >= planned and page_size < _JABLE_PAGE_SIZE:
+            # Past the reported page count only a completely full page
+            # justifies probing further: totalLinks/totalPages come from
+            # page markup that does not always match (the count then falls
+            # back to page 1's size), so a reported "1 page" is not trusted
+            # when page 1 came back full.  A short page is the last page.
+            break
+        try:
+            listing.loadPageAtIndex(index, sortby)
+        except Exception:
+            break  # Later-page failure: keep the pages already collected.
+        if getattr(listing, 'islist', None) is None:
+            break
+        page_size, added = collect()
+        if added == 0:
+            break  # Empty page, or a failed load replaying the previous one.
+        index += 1
+    total = max(len(results), getattr(listing, 'totalLinks', 0) or 0)
     return results, total
 
 
 def _search_missav(query):
     from uav_downloader.sites.missav import SiteMissAV
-    videos = SiteMissAV.search(query, 'cn') or []
-    results = [{'url': video.get('url', ''),
-                'title': video.get('title', ''),
-                'thumbnail': video.get('thumbnail', ''),
-                'duration': video.get('duration', ''),
-                'code': _missav_code(video.get('url', ''))}
-               for video in videos]
+    # The URL SiteMissAV.search builds for lang 'cn', fetched page by page
+    # (search() itself only ever returns the first page).
+    url = 'https://missav.ai/cn/search/' + quote(query, safe='')
+    results = []
+    seen = set()
+
+    def collect(videos):
+        added = 0
+        for video in videos or []:
+            video_url = video.get('url', '')
+            if not video_url or video_url in seen:
+                continue
+            seen.add(video_url)
+            results.append({'url': video_url,
+                            'title': video.get('title', ''),
+                            'thumbnail': video.get('thumbnail', ''),
+                            'duration': video.get('duration', ''),
+                            'code': _missav_code(video_url)})
+            added += 1
+        return added
+
+    first = SiteMissAV.fetch_page(url)  # Page-1 failure keeps the old error.
+    collect(first)
+    if first:
+        for page in range(2, _MAX_PAGES + 1):
+            try:
+                videos = SiteMissAV.fetch_page(SiteMissAV.page_url(url, page))
+            except Exception:
+                break  # Later-page failure: keep what we have.
+            if not videos or collect(videos) == 0:
+                break
     return results, len(results)
 
 
 def _search_supjav(query):
     from uav_downloader.sites.supjav import SupJavBrowser
-    videos = SupJavBrowser.search(query) or []
-    results = [{'url': video.get('url', ''),
-                'title': video.get('title', ''),
-                'thumbnail': video.get('thumbnail', ''),
-                'duration': video.get('duration', ''),
-                'code': _code_from_title(video.get('title', ''))}
-               for video in videos]
+    # SupJavBrowser.search() is fetch_page(search_url(query)) — one page.
+    base = SupJavBrowser.search_url(query)
+    results = []
+    seen = set()
+
+    def collect(videos):
+        added = 0
+        for video in videos or []:
+            video_url = video.get('url', '')
+            if not video_url or video_url in seen:
+                continue
+            seen.add(video_url)
+            results.append({'url': video_url,
+                            'title': video.get('title', ''),
+                            'thumbnail': video.get('thumbnail', ''),
+                            'duration': video.get('duration', ''),
+                            'code': _code_from_title(video.get('title', ''))})
+            added += 1
+        return added
+
+    first = SupJavBrowser.fetch_page(base)  # Page-1 failure = old error.
+    collect(first)
+    if first:
+        for page in range(2, _MAX_PAGES + 1):
+            try:
+                videos = SupJavBrowser.fetch_page(SupJavBrowser.page_url(base, page))
+            except Exception:
+                break  # Later-page failure: keep what we have.
+            if not videos or collect(videos) == 0:
+                break
     return results, len(results)
 
 
