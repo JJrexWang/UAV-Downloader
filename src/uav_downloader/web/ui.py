@@ -1,7 +1,8 @@
 """HGhub-style single-page UI for the NAS web queue (dependency-free).
 
-Account login: the session token issued by /api/login lives only in this
-tab's JavaScript memory; media URLs use the ?t= query form because
+Account login: the session token issued by /api/login persists in the
+browser's localStorage so a refresh keeps the login; logout or a
+server-side rejection clears it. Media URLs use the ?t= query form because
 <img>/<video> elements cannot set headers.
 """
 
@@ -437,6 +438,17 @@ details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospa
 
 JS = r'''"use strict";
 let sessionToken = "", session = 0, timer = null, readSeq = 0, busy = false, ppTimer = null;
+const SESSION_KEY = "uav.session";
+function storeSession(token) {
+  try {
+    if (token) localStorage.setItem(SESSION_KEY, token);
+    else localStorage.removeItem(SESSION_KEY);
+  } catch (error) { /* storage unavailable: login simply will not persist */ }
+}
+function readStoredSession() {
+  try { return localStorage.getItem(SESSION_KEY) || ""; }
+  catch (error) { return ""; }
+}
 let me = null, loginPassword = "";  // loginPassword only bridges login -> forced change; cleared right after.
 let site = "jable", lastResults = [], lastQuery = "", libLoaded = false;
 let queueActress = null, queueData = null;  // queueActress: null = group list, "" = 未分类 group, else actress name
@@ -461,7 +473,7 @@ async function api(path, body) {
   return data;
 }
 function toGate(notice) {
-  session++; readSeq++; sessionToken = ""; me = null; loginPassword = "";
+  session++; readSeq++; sessionToken = ""; storeSession(""); me = null; loginPassword = "";
   clearTimeout(timer); clearInterval(ppTimer);
   $("app").hidden = true; $("forceChange").hidden = true; $("onboard").hidden = true;
   $("bfModal").hidden = true; bfPlan = null; bfSel = new Set(); bfBusy = false; queueActress = null; queueData = null;
@@ -1337,6 +1349,7 @@ async function doLogin() {
     if (!response.ok) throw new Error(data.error || "登录失败");
     if (active !== session) return;
     sessionToken = data.session;
+    storeSession(data.session);
     me = {username: data.username, role: data.role, must_change: data.must_change};
     $("authNotice").textContent = "";
     if (data.must_change) { loginPassword = password; showForceChange(); return; }
@@ -1400,4 +1413,27 @@ $("cpSubmit").onclick = async () => {
     toast("密码已修改");
   } catch (error) { if (error.message !== "Unauthorized") toast(error.message); }
 };
+/* ---------------- session restore ---------------- */
+async function restoreSession() {
+  const stored = readStoredSession();
+  if (!stored) return;
+  const restoreGeneration = session;
+  sessionToken = stored;
+  let response;
+  try {
+    response = await fetch("/api/me", {method: "GET", cache: "no-store", credentials: "omit",
+      headers: {"Authorization": "Bearer " + stored}});
+  } catch (error) {
+    if (restoreGeneration === session) { storeSession(""); sessionToken = ""; }
+    return;
+  }
+  if (restoreGeneration !== session) return;
+  if (!response.ok) { storeSession(""); sessionToken = ""; return; }
+  const data = await response.json().catch(() => ({}));
+  if (restoreGeneration !== session) return;
+  if (data.must_change) { storeSession(""); sessionToken = ""; me = null; return; }
+  me = {username: data.username, role: data.role, must_change: data.must_change};
+  enterApp();
+}
+restoreSession();
 '''

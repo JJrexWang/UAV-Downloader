@@ -301,14 +301,19 @@ def test_api_auth_origin_host_and_no_token_query(web):
     assert TOKEN.encode() not in body
 
 
-def test_ui_is_static_safe_and_no_secret_persistence(web):
+def test_ui_is_static_safe_and_only_session_token_persistence(web):
     base, q = web
     status, headers, body = request(base, '/')
     assert status == 200 and b'UAV Downloader Web' in body
     assert headers['Content-Security-Policy'].startswith("default-src 'self'")
     js = request(base, '/app.js')[2]
-    for forbidden in (b'localStorage', b'sessionStorage', b'innerHTML', b'eval('):
+    for forbidden in (b'sessionStorage', b'innerHTML', b'eval('):
         assert forbidden not in js
+    # localStorage is used ONLY by storeSession/readStoredSession to persist
+    # the login session token across page refreshes (user requirement,
+    # 2026-11-25): exactly the set/get/remove calls of those two helpers.
+    assert b'uav.session' in js
+    assert js.count(b'localStorage') == 3
     assert request(base, '/../../queue.json')[0] == 404
     assert request(base, '/api/queue', {'jobs': [], 'token': TOKEN},
                    Authorization='Bearer ' + TOKEN)[0] == 400
