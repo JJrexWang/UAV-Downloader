@@ -754,18 +754,36 @@ async function openBackfill() {
     renderBfConfirm();
   } finally { $("backfillBtn").disabled = false; }
 }
+const BF_SKIP_REASONS = {in_library: "已在库", in_queue: "已在队列", no_actress: "无法识别女优", invalid_url: "链接无效"};
+function bfSkipSummary(skipped) {
+  return (skipped || []).map(s => (s.code || "—") + "（" + (BF_SKIP_REASONS[s.reason] || s.reason || "未知原因") + "）").join("、");
+}
 async function confirmBackfill() {
   if (bfBusy || !bfPlan) return;
   const chosen = [...bfSel].map(idx => bfPlan.items[idx]).filter(Boolean);
   if (!chosen.length) return;
   bfBusy = true; renderBfConfirm(); $("bfError").textContent = "";
   try {
-    const data = await api("/api/backfill/start", {items: chosen.map(i => ({url: i.url, code: i.code || ""}))});
-    bfBusy = false;
-    $("bfModal").hidden = true; bfPlan = null; bfSel = new Set();
-    toast("已加入下载队列 " + data.added + " 部" + (data.skipped && data.skipped.length ? "，跳过 " + data.skipped.length + " 部" : ""));
-    refreshQueue();
-    showView("queue");
+    const data = await api("/api/backfill/start", {
+      items: chosen.map(i => ({
+        url: i.url, code: i.code || "", title: i.title || i.site_title || "",
+        actress_jp: i.actress_jp || "", actress_cn: i.actress_cn || "",
+        target_dir: i.target_dir || "", target_name: i.target_name || ""})),
+      actress_hint: lastQuery});
+    const skipped = data.skipped || [];
+    if (data.added > 0) {
+      bfBusy = false;
+      $("bfModal").hidden = true; bfPlan = null; bfSel = new Set();
+      toast("已加入下载队列 " + data.added + " 部" + (skipped.length ? "，跳过 " + skipped.length + " 部：" + bfSkipSummary(skipped) : ""));
+      refreshQueue();
+      showView("queue");
+    } else {
+      // Nothing was enqueued: keep the dialog open and say why, instead
+      // of landing the user on an empty queue with no explanation.
+      $("bfError").textContent = skipped.length
+        ? "未能加入队列：" + bfSkipSummary(skipped)
+        : "未能加入队列。";
+    }
   } catch (error) {
     if (error.message !== "Unauthorized") $("bfError").textContent = error.message;
   } finally { bfBusy = false; renderBfConfirm(); }

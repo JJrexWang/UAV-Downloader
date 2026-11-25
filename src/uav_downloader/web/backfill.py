@@ -168,9 +168,60 @@ def plan(items, actress_hint, snapshot):
 # Start
 # ---------------------------------------------------------------------------
 
-def start(items, queue):
-    """Re-validate, enqueue ready items, record a filing intent per job."""
-    planned = plan(items, None, queue.snapshot())['items']
+def _text(item, key):
+    value = (item or {}).get(key)
+    return value.strip() if isinstance(value, str) else ''
+
+
+def _confirmed_entry(item):
+    """Plan entry built from the fields the user confirmed in the dialog.
+
+    The confirmed actress and title are taken as-is, but the filing target
+    is recomputed server-side — the client's target_dir/target_name are
+    never trusted verbatim.
+    """
+    url = item.get('url') or ''
+    code = (library.extract_code(item.get('code') or '')
+            or library.extract_code(url))
+    title = _text(item, 'title')
+    actress_jp = _text(item, 'actress_jp') or None
+    actress_cn = _text(item, 'actress_cn') or None
+    target_name = naming.build_name(code, actress_cn, actress_jp, title, '.mp4')
+    if not target_name:
+        target_name = _text(item, 'target_name') or None
+    return {'code': code, 'url': url, 'site_title': title,
+            'title': title, 'actress_jp': actress_jp,
+            'actress_cn': actress_cn,
+            'target_dir': (_find_actress_dir(actress_cn, actress_jp)
+                           or f'{library.TOP_JAV}/{actress_cn or actress_jp}'),
+            'target_name': target_name, 'status': 'ready'}
+
+
+def start(items, queue, actress_hint=None):
+    """Enqueue the confirmed plan; record a filing intent per job.
+
+    Items carrying the actress fields the user confirmed are filed exactly
+    as confirmed (targets recomputed server-side); the rest are re-resolved
+    through the plan path with *actress_hint*.  Either way every entry is
+    re-checked against the current library and queue before enqueueing.
+    """
+    snapshot = queue.snapshot()
+    library_codes = {w['code'] for w in library.scan_library() if w.get('code')}
+    queued_codes, queued_urls = _queued_marks(snapshot)
+    planned = []
+    for item in items or []:
+        if _text(item, 'actress_jp') or _text(item, 'actress_cn'):
+            entry = _confirmed_entry(item)
+            if entry['code'] and entry['code'] in library_codes:
+                entry['status'] = 'in_library'
+            elif ((entry['code'] and entry['code'] in queued_codes)
+                  or (entry['url']
+                      and entry['url'].rstrip('/') in queued_urls)):
+                entry['status'] = 'in_queue'
+        else:
+            entry = _resolve_item(item, actress_hint, library_codes,
+                                  queued_codes, queued_urls)
+        planned.append(entry)
     to_add, skipped = [], []
     seen_codes, seen_urls = set(), set()
     for entry in planned:

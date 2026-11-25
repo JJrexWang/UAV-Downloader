@@ -44,6 +44,24 @@ def _code_from_title(title):
     return _normalize_code(match.group(0)) if match else ''
 
 
+_CODE_SUFFIX_RE = re.compile(r'([A-Za-z]{2,6}-\d{2,5})[A-Za-z]+\d*')
+
+
+def _canonical_code(code):
+    """Canonical code for the library-membership test in :func:`search`.
+
+    Slug codes can carry a suffix the library extractor drops
+    (``ABW-041SDC3`` -> ``ABW-041``); comparing canonical forms keeps the
+    search annotation in agreement with backfill's plan.  Codes whose
+    digits come last (``FC2PPV-1234567``) do not match the pattern and
+    pass through unchanged.
+    """
+    match = _CODE_SUFFIX_RE.fullmatch(code or '')
+    if match:
+        return match.group(1).upper()
+    return (code or '').upper()
+
+
 def _search_jable(query):
     from uav_downloader.sites.jabletv import JableTVList
     # Path-style search URL: JableTVList parses the keyword out of the path
@@ -203,6 +221,6 @@ def search(site, query, queue_urls, library_codes):
                         'site': site,
                         'thumbnail': item.get('thumbnail', ''),
                         'duration': item.get('duration', ''),
-                        'in_library': bool(code) and code in known,
+                        'in_library': bool(code) and _canonical_code(code) in known,
                         'in_queue': url.rstrip('/') + '/' in queued})
     return {'results': results, 'total': total, 'error': None}

@@ -91,6 +91,10 @@ def _enrich_snapshot(snapshot):
     return snapshot
 
 
+_BACKFILL_ITEM_KEYS = ('url', 'code', 'title', 'actress_jp', 'actress_cn',
+                       'target_dir', 'target_name')
+
+
 def _backfill_items(data):
     """Validate the ``items`` field of a backfill request body."""
     items = data.get('items')
@@ -99,13 +103,12 @@ def _backfill_items(data):
     out = []
     for item in items:
         if (not isinstance(item, dict)
-                or not set(item) <= {'url', 'code', 'title'}
+                or not set(item) <= set(_BACKFILL_ITEM_KEYS)
                 or any(not isinstance(item.get(key, ''), str)
-                       for key in ('url', 'code', 'title'))
+                       for key in _BACKFILL_ITEM_KEYS)
                 or not item.get('url')):
             raise ValueError('Invalid backfill item')
-        out.append({'url': item.get('url', ''), 'code': item.get('code', ''),
-                    'title': item.get('title', '')})
+        out.append({key: item.get(key, '') for key in _BACKFILL_ITEM_KEYS})
     return out
 
 
@@ -633,9 +636,13 @@ def make_server(host, port, queue, allowed_hosts=None):
                         _backfill_items(data), hint, queue.snapshot()))
                     return
                 if self.path == '/api/backfill/start':
-                    if set(data) != {'items'}:
-                        raise ValueError('Expected only items')
-                    self._send(200, backfill.start(_backfill_items(data), queue))
+                    if not set(data) <= {'items', 'actress_hint'}:
+                        raise ValueError('Expected items and optional actress_hint')
+                    hint = data.get('actress_hint')
+                    if hint is not None and not isinstance(hint, str):
+                        raise ValueError('actress_hint must be a string')
+                    self._send(200, backfill.start(
+                        _backfill_items(data), queue, hint))
                     return
                 if self.path == '/api/settings':
                     self._send(200, save_settings(data))
