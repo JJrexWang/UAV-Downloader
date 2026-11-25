@@ -253,19 +253,23 @@ def start(items, queue, actress_hint=None):
         to_add.append(entry)
     added = 0
     if to_add:
-        jobs = queue.add([{'url': entry['url']} for entry in to_add])
         intents = {}
-        for entry, job in zip(to_add, jobs):
-            intents[job['id']] = {
-                'code': entry['code'],
-                'target_dir': entry['target_dir'],
-                'target_name': entry['target_name'],
-                'actress_cn': entry['actress_cn'],
-                'actress_jp': entry['actress_jp'],
-                'title': entry['title'],
-            }
+        # QueueManager.add accepts at most 100 jobs per call; enqueue in
+        # chunks so a confirmed backfill with more ready items still works.
+        for offset in range(0, len(to_add), 100):
+            batch = to_add[offset:offset + 100]
+            jobs = queue.add([{'url': entry['url']} for entry in batch])
+            for entry, job in zip(batch, jobs):
+                intents[job['id']] = {
+                    'code': entry['code'],
+                    'target_dir': entry['target_dir'],
+                    'target_name': entry['target_name'],
+                    'actress_cn': entry['actress_cn'],
+                    'actress_jp': entry['actress_jp'],
+                    'title': entry['title'],
+                }
+            added += len(jobs)
         _record_intents(intents)
-        added = len(jobs)
     return {'added': added, 'skipped': skipped}
 
 

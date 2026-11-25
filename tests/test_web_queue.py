@@ -301,6 +301,29 @@ def test_api_auth_origin_host_and_no_token_query(web):
     assert TOKEN.encode() not in body
 
 
+def test_backfill_plan_accepts_more_than_100_items(web, tmp_path, monkeypatch):
+    base, _ = web
+    actress_dir = tmp_path / 'library' / '01-日本JAV' / '明里つむぎ'
+    actress_dir.mkdir(parents=True)
+    items = []
+    for i in range(1, 102):
+        code = f'IPX-{i:03d}'
+        (actress_dir / f'{code} テスト 明里つむぎ.mp4').write_bytes(b'x')
+        items.append({
+            'url': f'https://jable.tv/videos/{code.lower()}/',
+            'code': code,
+            'title': f'{code} タイトル 明里つむぎ',
+        })
+    monkeypatch.setenv('LIBRARY_DIR', str(tmp_path / 'library'))
+    status, _, body = request(base, '/api/backfill/plan',
+                              {'items': items, 'actress_hint': '明里つむぎ'},
+                              Authorization='Bearer ' + TOKEN)
+    assert status == 200
+    planned = json.loads(body)['items']
+    assert len(planned) == 101
+    assert all(item['status'] == 'in_library' for item in planned)
+
+
 def test_ui_is_static_safe_and_only_session_token_persistence(web):
     base, q = web
     status, headers, body = request(base, '/')

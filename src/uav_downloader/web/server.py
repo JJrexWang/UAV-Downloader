@@ -98,8 +98,8 @@ _BACKFILL_ITEM_KEYS = ('url', 'code', 'title', 'actress_jp', 'actress_cn',
 def _backfill_items(data):
     """Validate the ``items`` field of a backfill request body."""
     items = data.get('items')
-    if not isinstance(items, list) or not 1 <= len(items) <= 100:
-        raise ValueError('items must be a list of 1..100 entries')
+    if not isinstance(items, list) or not 1 <= len(items) <= 1000:
+        raise ValueError('items must be a list of 1..1000 entries')
     out = []
     for item in items:
         if (not isinstance(item, dict)
