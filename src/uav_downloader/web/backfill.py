@@ -99,17 +99,25 @@ def _queued_marks(snapshot):
 
 
 def _find_actress_dir(actress_cn, actress_jp):
-    """Existing 01-日本JAV subdir for this actress (real name), or None."""
+    """Existing 01-日本JAV subdir for this actress (real name), or None.
+
+    Comparison tolerates traditional/simplified variants (the folder may
+    use 八挂海 while the resolved name came from a 八掛海 hint); the
+    returned path always carries the folder's real on-disk name.
+    """
     top = Path(library.library_root()) / library.TOP_JAV
     try:
         names = sorted(os.listdir(top))
     except OSError:
         return None
+    targets = {n for n in (actress_cn, actress_jp) if n}
+    normalised = {actress_svc.normalize_name(n) for n in targets}
     for name in names:
         if not (top / name).is_dir():
             continue
         cleaned = library.clean_actress_name(name)
-        if cleaned and cleaned in (actress_cn, actress_jp):
+        if cleaned and (cleaned in targets
+                        or actress_svc.normalize_name(cleaned) in normalised):
             return f'{library.TOP_JAV}/{name}'
     return None
 
@@ -138,8 +146,12 @@ def _resolve_item(item, hint, library_codes, queued_codes, queued_urls):
             actress_jp = hint
             actress_cn = actress_svc.cn_name_for(hint)
         else:
-            actress_cn = hint
-            actress_jp = actress_svc.resolve_jp_name(hint)
+            cn_exact, jp_exact = actress_svc.resolve_cn_entry(hint)
+            if cn_exact:
+                actress_cn, actress_jp = cn_exact, jp_exact
+            else:
+                actress_cn = hint
+                actress_jp = actress_svc.resolve_jp_name(hint)
     entry['actress_jp'] = actress_jp
     entry['actress_cn'] = actress_cn
     entry['title'] = site_title or meta.get('title') or ''

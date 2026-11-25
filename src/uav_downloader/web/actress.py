@@ -29,6 +29,7 @@ _KANA_RE = re.compile(r'[぀-ヿ]')
 _ACTRESS_HREF_RE = re.compile(r'/actresses/([a-z0-9_-]+)/?', re.I)
 _lock = threading.Lock()
 _reverse_cache = None
+_cn_index_cache = None
 
 
 def _cache_path():
@@ -49,6 +50,58 @@ def _reverse_map():
                 table[cn_name] = jp_name
         _reverse_cache = table
     return _reverse_cache
+
+
+# ---------------------------------------------------------------------------
+# Traditional/simplified variant tolerance (comparison only)
+# ---------------------------------------------------------------------------
+
+# Traditional -> simplified pairs for characters that actually differ in
+# actress names, plus the Japanese shinjitai equivalents Jable displays.
+# Used ONLY to compare names (folder lookup, CSV lookup); stored and
+# displayed names always keep their original characters.
+_VARIANT_PAIRS = (
+    '掛挂 澤泽 瀨濑 櫻樱 繪绘 遙遥 優优 亞亚 靜静 麗丽 '
+    '紗纱 織织 綾绫 雛雏 寧宁 嬌娇 憐怜 恵惠 彌弥 廣广 '
+    '遼辽 劍剑 嶋岛 嶌岛 濱滨 澁涩 圓圆 團团 榮荣 樹树 '
+    '沢泽 桜樱 絵绘 亜亚 広广 浜滨 渋涩 円圆 剣剑 実实'
+)
+_VARIANT_TABLE = str.maketrans(
+    {pair[0]: pair[1] for pair in _VARIANT_PAIRS.split()})
+
+
+def normalize_name(name):
+    """Variant-normalised *name* for comparison only (never stored)."""
+    return (name or '').translate(_VARIANT_TABLE)
+
+
+def _cn_index():
+    """Normalised CN name -> (CN name, JP name), first CSV row wins."""
+    global _cn_index_cache
+    if _cn_index_cache is None:
+        table = {}
+        for jp_name, (cn_name, _conf) in metadata.actress_map().items():
+            if cn_name:
+                table.setdefault(normalize_name(cn_name), (cn_name, jp_name))
+        _cn_index_cache = table
+    return _cn_index_cache
+
+
+def resolve_cn_entry(name):
+    """(CN name, JP name) for a Chinese actress name, or (None, None).
+
+    Exact CSV match first, then a traditional/simplified-tolerant match:
+    a hint typed with traditional characters (the form Jable displays)
+    still resolves to the CSV's simplified entry, so callers file into
+    the actress's existing folder instead of a variant-named new one.
+    """
+    text = (name or '').strip()
+    if not text:
+        return None, None
+    jp_name = _reverse_map().get(text)
+    if jp_name:
+        return text, jp_name
+    return _cn_index().get(normalize_name(text), (None, None))
 
 
 def looks_japanese(text):
