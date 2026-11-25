@@ -78,7 +78,8 @@ HTML = '''<!doctype html>
           <button id="searchBtn" class="primary">搜索</button>
         </div>
         <p id="searchStatus" class="meta"></p>
-        <div class="row" id="backfillRow" hidden><button id="backfillBtn" class="primary">一键补充入库</button><span class="meta">把本页不在库的作品下载并归入对应女优文件夹（按规范改名）</span></div>
+        <div class="row" id="backfillRow" hidden><button id="backfillBtn" class="primary">一键补充入库</button><span class="meta">把本页不在库的作品下载并归入对应女优文件夹（按规范改名）</span><span id="bfStats" class="meta"></span><button id="bfListToggle" class="ghost" hidden>查看清单</button></div>
+        <div id="bfMissingPanel" class="bf-missing" hidden></div>
         <div id="results" class="grid"></div>
       </div>
       <div class="card">
@@ -372,6 +373,12 @@ details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospa
 #content.wide{max-width:none}
 .lib-grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
 #backfillRow{margin-top:10px}
+#bfListToggle{padding:6px 12px;font-size:13px;flex:none}
+.bf-missing{margin-top:10px;background:var(--s1);border:1px solid var(--line);border-radius:10px;max-height:320px;overflow:auto;padding:4px 12px}
+.bf-miss-row{display:grid;grid-template-columns:110px 1fr auto;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--line);font-size:13px}
+.bf-miss-row:last-child{border-bottom:0}
+.bf-miss-code{font-weight:800;font-family:ui-monospace,Menlo,Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bf-miss-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--mut)}
 .picker{position:relative;margin-bottom:12px}
 .picker .row input[type="search"]{flex:1;min-width:200px}
 .crumbs{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:4px}
@@ -644,7 +651,7 @@ async function doSearch() {
   const q = $("q").value.trim();
   if (!q) { toast("请输入番号或女优名"); return; }
   $("searchBtn").disabled = true; $("searchStatus").textContent = "搜索中…";
-  $("backfillRow").hidden = true;
+  $("backfillRow").hidden = true; $("bfMissingPanel").hidden = true;
   try {
     const data = await api("/api/search?q=" + encodeURIComponent(q) + "&site=" + encodeURIComponent(site));
     lastResults = data.results || [];
@@ -655,8 +662,39 @@ async function doSearch() {
     if (!lastResults.length && !data.error) { const e = node("div", undefined, "empty"); e.append(node("h3", "没有结果"), node("p", "换个关键词或站点试试。")); grid.append(e); }
     for (const item of lastResults) grid.append(resultCard(item));
     $("backfillRow").hidden = !lastResults.length;
+    renderMissing();
   } catch (error) { $("searchStatus").textContent = ""; if (error.message !== "Unauthorized") toast(error.message); }
   finally { $("searchBtn").disabled = false; }
+}
+/* ---------------- search stats: 不在库清单 ---------------- */
+/* 纯函数：从搜索结果算不在库统计（可单测）。items 保持结果原序。 */
+function missingStats(results) {
+  const list = results || [];
+  let inLib = 0, inQueue = 0, downloadable = 0;
+  const items = [];
+  for (const item of list) {
+    if (item.in_library) { inLib++; continue; }
+    items.push(item);
+    if (item.in_queue) inQueue++; else downloadable++;
+  }
+  return {total: list.length, inLib, missing: items.length, inQueue, downloadable, items};
+}
+function renderMissing() {
+  const stats = missingStats(lastResults);
+  const statsEl = $("bfStats"), toggle = $("bfListToggle"), panel = $("bfMissingPanel");
+  panel.hidden = true; panel.replaceChildren();
+  toggle.textContent = "查看清单";
+  if (!lastResults.length) { statsEl.textContent = ""; toggle.hidden = true; return; }
+  if (!stats.missing) { statsEl.textContent = "全部已在库（共 " + stats.inLib + " 条）"; toggle.hidden = true; return; }
+  statsEl.textContent = "不在库 " + stats.missing + " 条 · 已在队列 " + stats.inQueue + " 条 · 可下载 " + stats.downloadable + " 条 · 已在库 " + stats.inLib + " 条";
+  toggle.hidden = false;
+  for (const item of stats.items) {
+    const row = node("div", undefined, "bf-miss-row");
+    row.append(node("span", item.code || "—", "bf-miss-code"),
+      node("span", item.title || "", "bf-miss-title"),
+      node("span", item.in_queue ? "已在队列" : "未下载", item.in_queue ? "tag queue" : "tag"));
+    panel.append(row);
+  }
 }
 /* ---------------- backfill （一键补充入库） ---------------- */
 function renderBfConfirm() {
@@ -1192,6 +1230,11 @@ $("resume").onclick = () => { if (confirm("已确认磁盘健康及剩余空间�
 $("libRefresh").onclick = () => { libActLoaded = false; loadLibrary(); };
 $("queueBack").onclick = () => { queueActress = null; if (queueData) renderQueue(queueData); };
 $("backfillBtn").onclick = openBackfill;
+$("bfListToggle").onclick = () => {
+  const panel = $("bfMissingPanel");
+  panel.hidden = !panel.hidden;
+  $("bfListToggle").textContent = panel.hidden ? "查看清单" : "收起清单";
+};
 $("bfClose").onclick = closeBackfill;
 $("bfCancel").onclick = closeBackfill;
 $("bfBackdrop").onclick = closeBackfill;
