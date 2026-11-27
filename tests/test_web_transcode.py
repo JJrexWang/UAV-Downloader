@@ -394,3 +394,109 @@ def test_hls_js_vendored_and_csp_blob(web):
     assert status == 200
     assert 'javascript' in headers['Content-Type']
     assert len(body) > 100_000
+
+
+# --- Phase 9.2: tiered encoder strategy ---------------------------------
+# Tier 1 = full VAAPI (hw decode + hw encode), tier 2 = hybrid (sw
+# decode + VAAPI encode), tier 3 = libx264.  The sandbox has no render
+# node, so sessions still land on tier 3 end to end; the tier plan and
+# command builders are unit-tested directly.
+
+def test_tier_plan_vaapi_decodable_codecs():
+    for codec in ('h264', 'hevc', 'vp9', 'vp8', 'av1', 'mpeg2video',
+                  'vc1', 'mjpeg'):
+        assert transcode.tier_plan(codec) == [1, 2, 3]
+    # Codec names are normalized (case/space) before the lookup.
+    assert transcode.tier_plan('HEVC') == [1, 2, 3]
+    assert transcode.tier_plan(' h264 ') == [1, 2, 3]
+
+
+def test_tier_plan_software_decode_codecs():
+    # MPEG-4 ASP and friends cannot be VAAPI-decoded at all, so the
+    # full-VAAPI tier is skipped and the plan starts at the hybrid.
+    for codec in ('mpeg4', 'msmpeg4v3', 'wmv3', 'rv40', 'theora',
+                  'unknown', ''):
+        assert transcode.tier_plan(codec) == [2, 3]
+    assert transcode.tier_plan(None) == [2, 3]
+
+
+def test_available_plan_no_device_is_software_only():
+    if Path(transcode._VAAPI_DEVICE).exists():
+        pytest.skip('render node present in this environment')
+    assert transcode._available_plan('hevc') == [3]
+    assert transcode._available_plan('mpeg4') == [3]
+
+
+def _bare_session(tmp_path):
+    return {'target': tmp_path / 'in.mkv', 'dir': tmp_path}
+
+
+def _vf_arg(cmd):
+    return cmd[cmd.index('-vf') + 1]
+
+
+def test_build_command_tier1_full_vaapi(tmp_path):
+    cmd = transcode._build_command(_bare_session(tmp_path), 3, 1)
+    assert cmd[cmd.index('-hwaccel') + 1] == 'vaapi'
+    assert cmd[cmd.index('-hwaccel_device') + 1] == '/dev/dri/renderD128'
+    assert '-hwaccel_output_format' in cmd
+    assert '-vaapi_device' not in cmd
+    assert 'scale_vaapi' in _vf_arg(cmd)
+    assert cmd[cmd.index('-c:v') + 1] == 'h264_vaapi'
+    assert '-force_key_frames' in cmd
+
+
+def test_build_command_tier2_hybrid(tmp_path):
+    cmd = transcode._build_command(_bare_session(tmp_path), 3, 2)
+    # Software decode: no -hwaccel anywhere; the device is only opened
+    # so frames can be uploaded for VAAPI encoding.
+    assert '-hwaccel' not in cmd
+    assert '-hwaccel_device' not in cmd
+    assert cmd[cmd.index('-vaapi_device') + 1] == '/dev/dri/renderD128'
+    vf = _vf_arg(cmd)
+    assert vf.startswith("scale=w=-2:h='min(1080,ih)'")
+    assert 'format=nv12,hwupload' in vf
+    assert 'scale_vaapi' not in vf
+    assert cmd[cmd.index('-c:v') + 1] == 'h264_vaapi'
+    assert cmd[cmd.index('-b:v') + 1] == '8M'
+    assert '-force_key_frames' in cmd
+
+
+def test_build_command_tier3_software(tmp_path):
+    cmd = transcode._build_command(_bare_session(tmp_path), 0, 3)
+    assert '-hwaccel' not in cmd
+    assert '-vaapi_device' not in cmd
+    assert 'hwupload' not in _vf_arg(cmd)
+    assert cmd[cmd.index('-c:v') + 1] == 'libx264'
+    assert '-force_key_frames' in cmd
+
+
+def test_spawn_env_gpu_tiers_pin_ihd():
+    for tier in (1, 2):
+        env = transcode._spawn_env(tier)
+        assert env is not None
+        assert env['LIBVA_DRIVER_NAME'] == 'iHD'
+    # Software runs inherit the parent environment untouched.
+    assert transcode._spawn_env(3) is None
+
+
+def test_note_tier_failure_marks_broken_and_records_tail(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(transcode, '_tier1_broken', False)
+    monkeypatch.setattr(transcode, '_tier2_broken', False)
+    monkeypatch.setattr(transcode, '_last_vaapi_error', None)
+    session_dir = tmp_path / 'sess'
+    session_dir.mkdir()
+    (session_dir / 'ffmpeg-hybrid.log').write_text(
+        'some banner\nboom: cannot open device\n', encoding='utf-8')
+    session = {'dir': session_dir, 'gpu_failed': False,
+               'vaapi_error': None}
+    transcode._note_tier_failure(session, 2)
+    assert transcode._tier2_broken is True
+    assert transcode._tier1_broken is False
+    assert session['gpu_failed'] is True
+    assert 'boom' in session['vaapi_error']
+    assert transcode._last_vaapi_error == session['vaapi_error']
+    # Tier 3 failures are not GPU failures and mark nothing.
+    transcode._note_tier_failure(session, 3)
+    assert transcode._tier1_broken is False

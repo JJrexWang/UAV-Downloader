@@ -1023,7 +1023,7 @@ async function plStartTranscode(state) {
   }
   state.sessionId = started.session;
   const url = started.playlist + "?t=" + encodeURIComponent(sessionToken);
-  const encoder = started.encoder === "vaapi" ? "VAAPI 硬件" : "libx264 软件";
+  const encoder = {vaapi: "VAAPI 硬件", "vaapi-hybrid": "VAAPI 编码"}[started.encoder] || "libx264 软件";
   const reason = state.info ? plReasonLabel(state.info.reason) : "";
   plSetStatus("转码 · " + encoder + (reason ? " · " + reason : "")
     + (started.vaapi_state === "fallback" ? "（VAAPI 回落）" : ""));

@@ -12,13 +12,17 @@ A segment request that lands far ahead of (or behind) the current run
 restarts ffmpeg at the requested index; completed segments are never
 re-encoded.
 
-Hardware encoding via VAAPI is attempted when a render node exists; if
-that ffmpeg dies without producing the wanted segment, VAAPI is marked
-broken for the process lifetime and the run respawns with libx264.
-Every run's stderr lands in the session dir (``ffmpeg.log`` /
-``ffmpeg-vaapi.log``) and is preserved under ``<state>/transcode-logs``
-when the session is removed, so a VAAPI failure can be diagnosed after
-the fact.
+GPU encoding is attempted in tiers when a render node exists, best
+first: tier 1 is full VAAPI (hardware decode + encode, only for codecs
+the hardware can decode), tier 2 is hybrid (software decode, frames
+uploaded for VAAPI encode — the only GPU path for sources like MPEG-4
+ASP in .avi), tier 3 is libx264.  A tier whose ffmpeg dies without
+producing the wanted segment is marked broken for the process lifetime
+and the run respawns on the next tier.  Every run's stderr lands in the
+session dir (``ffmpeg-vaapi.log`` / ``ffmpeg-hybrid.log`` /
+``ffmpeg.log``) and is preserved under ``<state>/transcode-logs`` when
+the session is removed, so a GPU failure can be diagnosed after the
+fact.
 """
 from __future__ import annotations
 
@@ -46,11 +50,58 @@ _ID_RE = re.compile(r'^[a-f0-9]{16}$')
 _SEG_RE = re.compile(r'^seg(\d{5})\.ts$')
 _LOG_KEEP = 10
 
+# Encoder tiers, best first.  Tier 1 couples VAAPI decode with VAAPI
+# encode, so it only works for codecs Intel hardware can decode at all;
+# tier 2 decodes in software and only encodes on the GPU, which makes
+# it the fallback for everything else (MPEG-4 ASP, WMV, ...).
+TIER_VAAPI = 1
+TIER_HYBRID = 2
+TIER_SOFTWARE = 3
+VAAPI_DECODABLE = {'h264', 'hevc', 'vp9', 'vp8', 'av1', 'mpeg2video',
+                   'vc1', 'mjpeg'}
+_TIER_ENCODER = {TIER_VAAPI: 'vaapi', TIER_HYBRID: 'vaapi-hybrid',
+                 TIER_SOFTWARE: 'libx264'}
+_TIER_LOG = {TIER_VAAPI: 'ffmpeg-vaapi.log',
+             TIER_HYBRID: 'ffmpeg-hybrid.log',
+             TIER_SOFTWARE: 'ffmpeg.log'}
+_SCALE_EXPR = "scale=w=-2:h='min(1080,ih)'"
+
 _lock = threading.Lock()
 _sessions = {}
-_vaapi_broken = False
+_tier1_broken = False
+_tier2_broken = False
 _last_vaapi_error = None
 _reaper_started = False
+
+
+def tier_plan(video_codec):
+    """Encoder tiers worth trying for a source video codec, best first.
+
+    Pure function of the codec: tier 1 (full VAAPI) is only planned
+    for codecs Intel hardware can decode; every plan ends with the
+    libx264 tier.  Device presence and broken-tier state are applied
+    separately by _available_plan.
+    """
+    codec = (video_codec or '').strip().lower()
+    if codec in VAAPI_DECODABLE:
+        return [TIER_VAAPI, TIER_HYBRID, TIER_SOFTWARE]
+    return [TIER_HYBRID, TIER_SOFTWARE]
+
+
+def _tier_broken(tier):
+    if tier == TIER_VAAPI:
+        return _tier1_broken
+    if tier == TIER_HYBRID:
+        return _tier2_broken
+    return False
+
+
+def _available_plan(video_codec):
+    """tier_plan filtered by render-node presence and broken tiers."""
+    if not Path(_VAAPI_DEVICE).exists():
+        return [TIER_SOFTWARE]
+    return [tier for tier in tier_plan(video_codec)
+            if not _tier_broken(tier)]
 
 
 def transcode_root():
@@ -88,15 +139,38 @@ def build_playlist(session):
 def _video_filter(encoder):
     if encoder == 'vaapi':
         return "scale_vaapi=w=-2:h='min(1080,ih)'"
-    return "scale=w=-2:h='min(1080,ih)'"
+    if encoder == 'vaapi-hybrid':
+        # Software scale (same expression as the pure software path),
+        # then upload the frames to the GPU for encoding.
+        return _SCALE_EXPR + ',format=nv12,hwupload'
+    return _SCALE_EXPR
 
 
-def _build_command(session, start_index):
+def _spawn_env(tier):
+    """Popen env for a run: GPU tiers pin libva to the iHD driver.
+
+    Coffee Lake (UHD 655) needs iHD; left to itself libva may pick the
+    legacy i965 driver and fail to open the device.  Software runs
+    inherit the environment untouched (None).
+    """
+    if tier in (TIER_VAAPI, TIER_HYBRID):
+        env = dict(os.environ)
+        env['LIBVA_DRIVER_NAME'] = 'iHD'
+        return env
+    return None
+
+
+def _build_command(session, start_index, tier):
+    encoder = _TIER_ENCODER[tier]
     cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin']
+    if tier == TIER_HYBRID:
+        # No -hwaccel: decoding stays in software; the device is only
+        # created so hwupload/h264_vaapi can encode.
+        cmd += ['-vaapi_device', _VAAPI_DEVICE]
     start = start_index * SEG_LEN
     if start > 0:
         cmd += ['-ss', f'{start:.3f}']
-    if session['run_encoder'] == 'vaapi':
+    if tier == TIER_VAAPI:
         cmd += ['-hwaccel', 'vaapi', '-hwaccel_device', _VAAPI_DEVICE,
                 '-hwaccel_output_format', 'vaapi']
     # -copyts keeps output timestamps on the source's absolute timeline,
@@ -104,8 +178,8 @@ def _build_command(session, start_index):
     # and its segments align with the server-generated playlist.
     cmd += ['-copyts', '-i', str(session['target']),
             '-map', '0:v:0', '-map', '0:a:0?',
-            '-vf', _video_filter(session['run_encoder'])]
-    if session['run_encoder'] == 'vaapi':
+            '-vf', _video_filter(encoder)]
+    if tier in (TIER_VAAPI, TIER_HYBRID):
         cmd += ['-c:v', 'h264_vaapi', '-b:v', '8M']
     else:
         cmd += ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23']
@@ -156,25 +230,44 @@ def _kill(session):
         pass
 
 
-def _start_run(session, start_index):
-    """(Re)start the session's ffmpeg at *start_index*.  Caller holds _lock."""
+def _state_for_tier(session, tier):
+    """The vaapi_state a session reports while running on *tier*."""
+    if tier == TIER_VAAPI:
+        return 'active'
+    if tier == TIER_HYBRID:
+        return 'hybrid'
+    if (session.get('gpu_failed')
+            or _tier1_broken or _tier2_broken):
+        return 'fallback'
+    return 'no_device'
+
+
+def _start_run(session, start_index, tier=None):
+    """(Re)start the session's ffmpeg at *start_index* on *tier*.
+
+    *tier* defaults to the best tier still available for the session's
+    source codec.  Caller holds _lock.
+    """
     _kill(session)
-    encoder = ('vaapi' if Path(_VAAPI_DEVICE).exists() and not _vaapi_broken
-               else 'libx264')
+    if tier is None:
+        tier = _available_plan(session.get('video_codec'))[0]
+    encoder = _TIER_ENCODER[tier]
     session['encoder'] = encoder
     session['run_encoder'] = encoder
+    session['run_tier'] = tier
     session['run_start_index'] = start_index
+    session['vaapi_state'] = _state_for_tier(session, tier)
     for tmp in session['dir'].glob('*.tmp'):
         try:
             tmp.unlink()
         except OSError:
             pass
-    log_name = 'ffmpeg-vaapi.log' if encoder == 'vaapi' else 'ffmpeg.log'
-    log = open(session['dir'] / log_name, 'wb')
+    log = open(session['dir'] / _TIER_LOG[tier], 'wb')
     try:
         proc = subprocess.Popen(
-            _build_command(session, start_index),
+            _build_command(session, start_index, tier),
             stdout=subprocess.DEVNULL, stderr=log,
+            env=_spawn_env(tier),
             start_new_session=True)
     finally:
         log.close()
@@ -192,14 +285,23 @@ def _log_tail(session, name, limit=800):
     return text[-limit:] if text else None
 
 
-def _note_vaapi_failure(session):
-    """Record why VAAPI failed and stop trying it for this process."""
-    global _vaapi_broken, _last_vaapi_error
-    error = _log_tail(session, 'ffmpeg-vaapi.log')
+def _note_tier_failure(session, tier):
+    """Record why a GPU tier failed and stop trying it for this process.
+
+    vaapi_error always carries the stderr tail of the last GPU tier
+    that failed; the next _start_run moves on to the following tier.
+    """
+    global _tier1_broken, _tier2_broken, _last_vaapi_error
+    if tier not in (TIER_VAAPI, TIER_HYBRID):
+        return
+    error = _log_tail(session, _TIER_LOG[tier])
+    session['gpu_failed'] = True
     session['vaapi_error'] = error
-    session['vaapi_state'] = 'fallback'
     _last_vaapi_error = error
-    _vaapi_broken = True
+    if tier == TIER_VAAPI:
+        _tier1_broken = True
+    else:
+        _tier2_broken = True
 
 
 def _preserve_logs(session):
@@ -271,6 +373,22 @@ def purge_all():
                 pass
 
 
+def _run_failed_fast(session, proc, start_index):
+    """Watchdog: True when a fresh run died within ~2s segmentless.
+
+    A GPU ffmpeg that exits non-zero almost immediately without
+    producing the segment it started at means that tier is unusable
+    (bad device, undecodable codec, missing driver, ...).
+    """
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    return (proc.poll() not in (None, 0)
+            and _frontier(session) < start_index)
+
+
 def _duration_for(rel, target):
     duration = float(probe.probe(rel).get('duration') or 0)
     if duration > 0:
@@ -302,16 +420,18 @@ def start(rel, offset=0.0):
     duration = _duration_for(rel, target)
     if duration <= 0:
         raise ValueError('no_duration')
+    verdict = probe.probe(rel)
+    video_codec = str((verdict.get('video') or {}).get('codec') or '')
     _ensure_reaper()
     session_id = secrets.token_hex(8)
     session_dir = transcode_root() / session_id
     count = segment_count(duration)
     start_index = min(int(offset // SEG_LEN), count - 1)
     if Path(_VAAPI_DEVICE).exists():
-        vaapi_state = 'fallback' if _vaapi_broken else 'active'
-        vaapi_error = _last_vaapi_error if _vaapi_broken else None
+        gpu_broken = _tier1_broken or _tier2_broken
+        vaapi_error = _last_vaapi_error if gpu_broken else None
     else:
-        vaapi_state, vaapi_error = 'no_device', None
+        vaapi_error = None
     with _lock:
         if len(_sessions) >= MAX_SESSIONS:
             raise ValueError('busy')
@@ -319,28 +439,27 @@ def start(rel, offset=0.0):
         session = {'id': session_id, 'dir': session_dir, 'proc': None,
                    'rel': rel, 'target': target, 'offset': offset,
                    'duration': duration, 'nsegments': count,
+                   'video_codec': video_codec,
                    'encoder': 'libx264', 'run_encoder': 'libx264',
+                   'run_tier': TIER_SOFTWARE, 'gpu_failed': False,
                    'run_start_index': None,
-                   'vaapi_state': vaapi_state, 'vaapi_error': vaapi_error,
+                   # Provisional; _start_run sets the real value for
+                   # the tier the first run lands on.
+                   'vaapi_state': 'no_device', 'vaapi_error': vaapi_error,
                    'last_access': time.monotonic()}
         _sessions[session_id] = session
     try:
         with _lock:
             proc = _start_run(session, start_index)
-        if session['run_encoder'] == 'vaapi':
-            # Watchdog: a VAAPI ffmpeg that exits non-zero within ~2s
-            # without producing a segment means the hardware path is
-            # unusable; mark it broken and respawn in software.
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.1)
-            if (proc.poll() not in (None, 0)
-                    and _frontier(session) < start_index):
-                with _lock:
-                    _note_vaapi_failure(session)
-                    _start_run(session, start_index)
+        # Watchdog cascade: a GPU tier whose ffmpeg dies within ~2s
+        # without producing a segment is marked broken and the run
+        # respawns on the next tier, until a tier produces (or the
+        # software tier is reached, which is trusted as-is).
+        while (session['run_tier'] in (TIER_VAAPI, TIER_HYBRID)
+               and _run_failed_fast(session, proc, start_index)):
+            with _lock:
+                _note_tier_failure(session, session['run_tier'])
+                proc = _start_run(session, start_index)
     except Exception:
         with _lock:
             _sessions.pop(session_id, None)
@@ -356,7 +475,8 @@ def ensure_segment(session, index):
     *index* and is within _FRONTIER_WAIT segments of it, wait for it;
     anything else (no run, finished run, *index* behind the run's start,
     far jump) restarts ffmpeg at *index* — earlier segments stay valid.
-    A VAAPI run that dies aimed at *index* falls back to software once.
+    A GPU run that dies aimed at *index* cascades to the next tier
+    (at most one cascade per GPU tier per call).
     Returns True when the file exists, False on transcode failure.
     """
     seg = session['dir'] / _seg_name(index)
@@ -364,7 +484,7 @@ def ensure_segment(session, index):
         touch(session['id'])
         return True
     deadline = time.monotonic() + _SEG_WAIT
-    fallback_used = False
+    cascades = 0
     while time.monotonic() < deadline:
         if seg.is_file():
             touch(session['id'])
@@ -385,10 +505,10 @@ def ensure_segment(session, index):
                     _start_run(session, index)
             elif proc is not None and session['run_start_index'] == index:
                 # A run aimed exactly at this segment died without it.
-                if (session['run_encoder'] == 'vaapi'
-                        and not fallback_used):
-                    _note_vaapi_failure(session)
-                    fallback_used = True
+                if (session.get('run_tier') in (TIER_VAAPI, TIER_HYBRID)
+                        and cascades < 2):
+                    _note_tier_failure(session, session['run_tier'])
+                    cascades += 1
                     _start_run(session, index)
                 else:
                     return False
