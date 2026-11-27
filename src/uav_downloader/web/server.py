@@ -549,22 +549,11 @@ def make_server(host, port, queue, allowed_hosts=None):
                 self._send(404, {'error': 'Not found'})
                 return
             transcode.touch(session_id)
-            target = session['dir'] / filename
             if filename == 'index.m3u8':
-                # ffmpeg writes the playlist shortly after spawn; wait a
-                # little instead of making the player retry on a 404.
-                deadline = time.monotonic() + 5
-                while not target.is_file() and time.monotonic() < deadline:
-                    time.sleep(0.1)
-            if not target.is_file():
-                self._send(404, {'error': 'Not found'})
-                return
-            try:
-                payload = target.read_bytes()
-            except OSError:
-                self._send(404, {'error': 'Not found'})
-                return
-            if filename == 'index.m3u8':
+                # The playlist is generated from the probed duration (a
+                # full-length VOD list), not written by ffmpeg, so it is
+                # complete from the first request.
+                payload = transcode.build_playlist(session).encode('utf-8')
                 # hls.js and Safari resolve segment URLs relative to the
                 # playlist URL and drop its query string, so bake the
                 # media token into the segment lines themselves.
@@ -578,6 +567,18 @@ def make_server(host, port, queue, allowed_hosts=None):
                         for line in lines) + '\n').encode('utf-8')
                 content_type = 'application/vnd.apple.mpegurl'
             else:
+                index = int(filename[3:-3])
+                if index >= session['nsegments']:
+                    self._send(404, {'error': 'Not found'})
+                    return
+                if not transcode.ensure_segment(session, index):
+                    self._send(502, {'error': 'transcode failed'})
+                    return
+                try:
+                    payload = (session['dir'] / filename).read_bytes()
+                except OSError:
+                    self._send(404, {'error': 'Not found'})
+                    return
                 content_type = 'video/mp2t'
             self.send_response(200)
             self.send_header('Content-Type', content_type)
@@ -612,14 +613,18 @@ def make_server(host, port, queue, allowed_hosts=None):
                 if str(exc) == 'not_found':
                     self._send(404, {'error': 'Not found'})
                     return
+                if str(exc) == 'no_duration':
+                    self._send(400, {'error': '无法读取视频时长，无法转码播放'})
+                    return
                 raise
-            info = probe.probe(rel)
             self._send(200, {
                 'session': session['id'],
                 'playlist': f"/api/hls/{session['id']}/index.m3u8",
                 'offset': session['offset'],
                 'encoder': session['encoder'],
-                'duration': info.get('duration', 0.0)})
+                'duration': session['duration'],
+                'vaapi_state': session['vaapi_state'],
+                'vaapi_error': session['vaapi_error']})
 
         def _do_play_stop(self, data):
             if set(data) != {'session'} or not isinstance(data['session'], str):

@@ -970,11 +970,10 @@ async function loadLibrary() {
 /* ---------------- player ----------------
    Playback starts with a probe: browser-playable files stream directly
    (unchanged), everything else is transcoded on demand to HLS and played
-   through hls.js (or Safari's native HLS).  A transcode session covers
-   the file from a start offset; seeking past the buffered range restarts
-   the session at the target point. */
-let plState = null;        // {rel, sessionId, offset, hls, info, restarting}
-let plSeekTimer = null;
+   through hls.js (or Safari's native HLS).  The server generates a
+   full-length VOD playlist from the probed duration and produces
+   segments on demand, so seeking is native — the timeline never moves. */
+let plState = null;        // {rel, sessionId, hls, info}
 
 function plSetStatus(text) { $("plStatus").textContent = text || ""; }
 
@@ -994,7 +993,6 @@ function plReasonLabel(reason) {
 }
 
 function plTeardown() {
-  if (plSeekTimer) { clearTimeout(plSeekTimer); plSeekTimer = null; }
   if (!plState) return;
   if (plState.hls) { try { plState.hls.destroy(); } catch (e) { /* already gone */ } }
   if (plState.sessionId) {
@@ -1006,12 +1004,12 @@ function plTeardown() {
   plState = null;
 }
 
-async function plStartTranscode(state, offset) {
+async function plStartTranscode(state) {
   const video = $("plVideo");
-  plSetStatus(offset > 0 ? "正在跳转…" : "正在启动转码…");
+  plSetStatus("正在启动转码…");
   let started;
   try {
-    started = await api("/api/play/start", {rel: state.rel, t: offset});
+    started = await api("/api/play/start", {rel: state.rel, t: 0});
   } catch (e) {
     if (plState !== state) return;
     plSetStatus("转码启动失败：" + (e && e.message ? e.message : "未知错误") + "，已改用直通尝试");
@@ -1024,13 +1022,14 @@ async function plStartTranscode(state, offset) {
     return;
   }
   state.sessionId = started.session;
-  state.offset = started.offset || offset;
   const url = started.playlist + "?t=" + encodeURIComponent(sessionToken);
   const encoder = started.encoder === "vaapi" ? "VAAPI 硬件" : "libx264 软件";
   const reason = state.info ? plReasonLabel(state.info.reason) : "";
-  plSetStatus("转码 · " + encoder + (reason ? " · " + reason : ""));
+  plSetStatus("转码 · " + encoder + (reason ? " · " + reason : "")
+    + (started.vaapi_state === "fallback" ? "（VAAPI 回落）" : ""));
   if (window.Hls && window.Hls.isSupported()) {
-    const hls = new window.Hls({maxBufferLength: 30});
+    const hls = new window.Hls({maxBufferLength: 60, fragLoadingTimeOut: 60000,
+      fragLoadingMaxRetry: 4, manifestLoadingMaxRetry: 2});
     state.hls = hls;
     hls.loadSource(url);
     hls.attachMedia(video);
@@ -1051,9 +1050,8 @@ async function openPlayer(work) {
   $("plInfo").textContent = work.rel + " · " + fmtSize(work.size);
   plSetStatus("正在检测格式…");
   $("player").hidden = false;
-  const state = {rel: work.rel, sessionId: null, offset: 0, hls: null, info: null, restarting: false};
+  const state = {rel: work.rel, sessionId: null, hls: null, info: null};
   plState = state;
-  video.onseeking = plOnSeeking;
   let info = null;
   try {
     info = await api("/api/play/info?rel=" + encodeURIComponent(work.rel) + "&t=" + encodeURIComponent(sessionToken));
@@ -1065,27 +1063,7 @@ async function openPlayer(work) {
     plSetStatus("直通 · " + plCodecLabel(info));
     return;
   }
-  await plStartTranscode(state, 0);
-}
-
-function plOnSeeking() {
-  const state = plState;
-  if (!state || !state.sessionId || state.restarting) return;
-  const video = $("plVideo");
-  if (!video.buffered || video.buffered.length === 0) return;
-  if (video.currentTime <= video.buffered.end(video.buffered.length - 1) + 2) return;
-  if (plSeekTimer) clearTimeout(plSeekTimer);
-  plSeekTimer = setTimeout(() => {
-    plSeekTimer = null;
-    if (plState !== state || !state.sessionId) return;
-    const target = state.offset + Math.floor(video.currentTime);
-    const oldSession = state.sessionId;
-    state.restarting = true;
-    state.sessionId = null;
-    if (state.hls) { try { state.hls.destroy(); } catch (e) { /* already gone */ } state.hls = null; }
-    api("/api/play/stop", {session: oldSession}).catch(() => {});
-    plStartTranscode(state, target).finally(() => { state.restarting = false; });
-  }, 300);
+  await plStartTranscode(state);
 }
 
 function closePlayer() {

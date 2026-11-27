@@ -182,8 +182,15 @@ def test_transcode_hls_flow(web, media, env):
     assert started['offset'] == 0
     assert started['duration'] > 0
     assert started['playlist'] == f'/api/hls/{session_id}/index.m3u8'
+    if not Path('/dev/dri/renderD128').exists():
+        assert started['vaapi_state'] == 'no_device'
+        assert started['vaapi_error'] is None
 
     playlist = _get_playlist(base, session_id)
+    # The playlist is server-generated: a complete VOD list from the
+    # first request, not an event list that grows with the transcode.
+    assert '#EXT-X-PLAYLIST-TYPE:VOD' in playlist
+    assert '#EXT-X-ENDLIST' in playlist
     seg_lines = [line for line in playlist.splitlines()
                  if line and not line.startswith('#')]
     assert seg_lines, playlist
@@ -204,15 +211,7 @@ def test_transcode_hls_flow(web, media, env):
     assert codecs['video'] == 'h264'
     assert codecs['audio'] == 'aac'
 
-    # The short source finishes quickly; ffmpeg must close the event
-    # playlist with ENDLIST so players see the true end.
-    deadline = time.monotonic() + 20
-    while '#EXT-X-ENDLIST' not in playlist and time.monotonic() < deadline:
-        time.sleep(0.5)
-        playlist = _get_playlist(base, session_id, timeout=5)
-    assert '#EXT-X-ENDLIST' in playlist
-
-    # Seek-restart: a fresh session at an offset.
+    # A fresh session can also be started at an offset.
     status, _, body = request(base, '/api/play/start',
                               {'rel': 'hard.mkv', 't': 1}, **auth)
     assert status == 200
@@ -265,6 +264,125 @@ def test_transcode_session_cap(web, media):
     finally:
         for session_id in started:
             request(base, '/api/play/stop', {'session': session_id}, **auth)
+
+
+@pytest.fixture
+def media_long(env):
+    library = env / 'library'
+    _ffmpeg(['-f', 'lavfi', '-i', 'testsrc2=duration=26:size=320x240:rate=10',
+             '-f', 'lavfi', '-i', 'sine=frequency=440:duration=26',
+             '-c:v', 'libx265', '-preset', 'ultrafast', '-c:a', 'ac3',
+             '-shortest', '-y', str(library / 'long.mkv')])
+    return library
+
+
+def test_vod_playlist_matches_duration(web, media_long):
+    base, _ = web
+    auth = {'Authorization': 'Bearer ' + TOKEN}
+    status, _, body = request(base, '/api/play/start',
+                              {'rel': 'long.mkv', 't': 0}, **auth)
+    assert status == 200
+    started = json.loads(body)
+    session_id = started['session']
+    try:
+        status, _, body = request(
+            base, f'/api/hls/{session_id}/index.m3u8?t={TOKEN}')
+        assert status == 200
+        playlist = body.decode('utf-8')
+        assert '#EXT-X-PLAYLIST-TYPE:VOD' in playlist
+        assert playlist.rstrip().endswith('#EXT-X-ENDLIST')
+        extinf = [float(line.split(':', 1)[1].rstrip(','))
+                  for line in playlist.splitlines()
+                  if line.startswith('#EXTINF:')]
+        # ceil(26/4) = 7 segments whose lengths sum to the duration.
+        assert len(extinf) == transcode.segment_count(started['duration'])
+        assert len(extinf) == 7
+        assert abs(sum(extinf) - started['duration']) < 0.01
+        seg_lines = [line for line in playlist.splitlines()
+                     if line and not line.startswith('#')]
+        assert seg_lines == [f'seg{i:05d}.ts?t={TOKEN}' for i in range(7)]
+    finally:
+        request(base, '/api/play/stop', {'session': session_id}, **auth)
+
+
+@pytest.fixture
+def media_colors(env):
+    library = env / 'library'
+    _ffmpeg(['-f', 'lavfi', '-i',
+             'color=c=red:duration=30:size=320x240:rate=10',
+             '-f', 'lavfi', '-i',
+             'color=c=green:duration=30:size=320x240:rate=10',
+             '-f', 'lavfi', '-i',
+             'color=c=blue:duration=30:size=320x240:rate=10',
+             '-f', 'lavfi', '-i', 'sine=frequency=440:duration=90',
+             '-filter_complex', '[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]',
+             '-map', '[v]', '-map', '3:a',
+             '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'ac3',
+             '-shortest', '-y', str(library / 'colors.mkv')])
+    return library
+
+
+def _frame_rgb(tmp_path, name, payload):
+    src = tmp_path / name
+    src.write_bytes(payload)
+    out = tmp_path / (name + '.rgb')
+    subprocess.run(['ffmpeg', '-v', 'error', '-i', str(src),
+                    '-frames:v', '1', '-vf', 'scale=1:1',
+                    '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-y', str(out)],
+                   check=True, timeout=60)
+    data = out.read_bytes()
+    return data[0], data[1], data[2]
+
+
+def test_segment_position_true(web, media_colors, tmp_path):
+    """Segments carry the content of their absolute position.
+
+    colors.mkv is red (0-30s) / green (30-60s) / blue (60-90s).  Asking
+    for segment 11 (44-48s) first must restart ffmpeg at that index and
+    serve green content; segment 0 must be red.  This only passes if
+    -copyts and the forced-keyframe grid keep runs on the absolute
+    timeline.
+    """
+    base, _ = web
+    auth = {'Authorization': 'Bearer ' + TOKEN}
+    status, _, body = request(base, '/api/play/start',
+                              {'rel': 'colors.mkv', 't': 0}, **auth)
+    assert status == 200
+    session_id = json.loads(body)['session']
+    try:
+        status, _, payload = request(
+            base, f'/api/hls/{session_id}/seg00011.ts?t={TOKEN}',
+            timeout=60)
+        assert status == 200
+        r, g, b = _frame_rgb(tmp_path, 'seg11.ts', payload)
+        assert g > r and g > b, (r, g, b)
+        status, _, payload = request(
+            base, f'/api/hls/{session_id}/seg00000.ts?t={TOKEN}',
+            timeout=60)
+        assert status == 200
+        r, g, b = _frame_rgb(tmp_path, 'seg0.ts', payload)
+        assert r > g and r > b, (r, g, b)
+    finally:
+        request(base, '/api/play/stop', {'session': session_id}, **auth)
+
+
+def test_stop_preserves_ffmpeg_logs(web, media, env):
+    base, _ = web
+    auth = {'Authorization': 'Bearer ' + TOKEN}
+    status, _, body = request(base, '/api/play/start',
+                              {'rel': 'hard.mkv', 't': 0}, **auth)
+    assert status == 200
+    session_id = json.loads(body)['session']
+    status, _, _ = request(
+        base, f'/api/hls/{session_id}/seg00000.ts?t={TOKEN}', timeout=60)
+    assert status == 200
+    status, _, _ = request(base, '/api/play/stop',
+                           {'session': session_id}, **auth)
+    assert status == 200
+    assert not (env / 'state' / 'transcode' / session_id).exists()
+    preserved = list((env / 'state' / 'transcode-logs').glob(
+        f'{session_id}-*ffmpeg.log'))
+    assert preserved, 'ffmpeg log was not preserved on stop'
 
 
 def test_hls_js_vendored_and_csp_blob(web):
