@@ -8,7 +8,7 @@ server-side rejection clears it. Media URLs use the ?t= query form because
 
 HTML = '''<!doctype html>
 <html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>UAV Downloader Web</title><link rel="stylesheet" href="/app.css"><script src="/app.js" defer></script></head>
+<title>UAV Downloader Web</title><link rel="stylesheet" href="/app.css"><script src="/app.js" defer></script><script src="/hls.min.js" defer></script></head>
 <body>
 <section id="auth" class="gate">
   <div class="auth-card">
@@ -225,6 +225,7 @@ HTML = '''<!doctype html>
     <div class="pl-head"><span id="plTitle"></span><button id="plClose" class="icon-btn" aria-label="关闭">✕</button></div>
     <video id="plVideo" controls playsinline></video>
     <p id="plInfo" class="meta"></p>
+    <p id="plStatus" class="meta"></p>
   </div>
 </div>
 <div id="bfModal" hidden>
@@ -966,17 +967,132 @@ async function loadLibrary() {
   loadLibActresses();
   await loadLibraryTree();
 }
-/* ---------------- player ---------------- */
-function openPlayer(work) {
-  $("plTitle").textContent = (work.code ? work.code + " " : "") + (work.title || "");
-  $("plInfo").textContent = work.rel + " · " + fmtSize(work.size);
-  const video = $("plVideo");
-  video.src = "/api/stream?rel=" + encodeURIComponent(work.rel) + "&t=" + encodeURIComponent(sessionToken);
-  $("player").hidden = false;
+/* ---------------- player ----------------
+   Playback starts with a probe: browser-playable files stream directly
+   (unchanged), everything else is transcoded on demand to HLS and played
+   through hls.js (or Safari's native HLS).  A transcode session covers
+   the file from a start offset; seeking past the buffered range restarts
+   the session at the target point. */
+let plState = null;        // {rel, sessionId, offset, hls, info, restarting}
+let plSeekTimer = null;
+
+function plSetStatus(text) { $("plStatus").textContent = text || ""; }
+
+function plCodecLabel(info) {
+  const v = info && info.video ? String(info.video.codec || "").toUpperCase() : "";
+  const a = info && info.audio && info.audio.length ? String(info.audio[0]).toUpperCase() : "无音轨";
+  return v ? v + "/" + a : a;
 }
-function closePlayer() {
+
+function plReasonLabel(reason) {
+  if (!reason) return "";
+  const labels = {hevc: "HEVC", mkv: "MKV 容器", ac3: "AC3 音频", eac3: "E-AC3 音频",
+                  dts: "DTS 音频", truehd: "TrueHD 音频", probe_failed: "格式探测失败"};
+  const parts = String(reason).split(":");
+  const value = parts.length > 1 ? parts[1] : parts[0];
+  return labels[value] || String(reason).toUpperCase();
+}
+
+function plTeardown() {
+  if (plSeekTimer) { clearTimeout(plSeekTimer); plSeekTimer = null; }
+  if (!plState) return;
+  if (plState.hls) { try { plState.hls.destroy(); } catch (e) { /* already gone */ } }
+  if (plState.sessionId) {
+    const sid = plState.sessionId;
+    fetch("/api/play/stop", {method: "POST", keepalive: true, credentials: "omit",
+      headers: {"Authorization": "Bearer " + sessionToken, "Content-Type": "application/json"},
+      body: JSON.stringify({session: sid})}).catch(() => {});
+  }
+  plState = null;
+}
+
+async function plStartTranscode(state, offset) {
+  const video = $("plVideo");
+  plSetStatus(offset > 0 ? "正在跳转…" : "正在启动转码…");
+  let started;
+  try {
+    started = await api("/api/play/start", {rel: state.rel, t: offset});
+  } catch (e) {
+    if (plState !== state) return;
+    plSetStatus("转码启动失败：" + (e && e.message ? e.message : "未知错误") + "，已改用直通尝试");
+    video.src = "/api/stream?rel=" + encodeURIComponent(state.rel) + "&t=" + encodeURIComponent(sessionToken);
+    return;
+  }
+  if (plState !== state) {
+    // The player was closed or replaced while the session started.
+    api("/api/play/stop", {session: started.session}).catch(() => {});
+    return;
+  }
+  state.sessionId = started.session;
+  state.offset = started.offset || offset;
+  const url = started.playlist + "?t=" + encodeURIComponent(sessionToken);
+  const encoder = started.encoder === "vaapi" ? "VAAPI 硬件" : "libx264 软件";
+  const reason = state.info ? plReasonLabel(state.info.reason) : "";
+  plSetStatus("转码 · " + encoder + (reason ? " · " + reason : ""));
+  if (window.Hls && window.Hls.isSupported()) {
+    const hls = new window.Hls({maxBufferLength: 30});
+    state.hls = hls;
+    hls.loadSource(url);
+    hls.attachMedia(video);
+    hls.on(window.Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}); });
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = url;
+  } else {
+    plSetStatus("当前浏览器不支持 HLS 播放，已改用直通尝试");
+    video.src = "/api/stream?rel=" + encodeURIComponent(state.rel) + "&t=" + encodeURIComponent(sessionToken);
+  }
+}
+
+async function openPlayer(work) {
+  plTeardown();
   const video = $("plVideo");
   video.pause(); video.removeAttribute("src"); video.load();
+  $("plTitle").textContent = (work.code ? work.code + " " : "") + (work.title || "");
+  $("plInfo").textContent = work.rel + " · " + fmtSize(work.size);
+  plSetStatus("正在检测格式…");
+  $("player").hidden = false;
+  const state = {rel: work.rel, sessionId: null, offset: 0, hls: null, info: null, restarting: false};
+  plState = state;
+  video.onseeking = plOnSeeking;
+  let info = null;
+  try {
+    info = await api("/api/play/info?rel=" + encodeURIComponent(work.rel) + "&t=" + encodeURIComponent(sessionToken));
+  } catch (e) { info = null; }
+  if (plState !== state) return;
+  state.info = info;
+  if (info && info.mode === "direct") {
+    video.src = "/api/stream?rel=" + encodeURIComponent(work.rel) + "&t=" + encodeURIComponent(sessionToken);
+    plSetStatus("直通 · " + plCodecLabel(info));
+    return;
+  }
+  await plStartTranscode(state, 0);
+}
+
+function plOnSeeking() {
+  const state = plState;
+  if (!state || !state.sessionId || state.restarting) return;
+  const video = $("plVideo");
+  if (!video.buffered || video.buffered.length === 0) return;
+  if (video.currentTime <= video.buffered.end(video.buffered.length - 1) + 2) return;
+  if (plSeekTimer) clearTimeout(plSeekTimer);
+  plSeekTimer = setTimeout(() => {
+    plSeekTimer = null;
+    if (plState !== state || !state.sessionId) return;
+    const target = state.offset + Math.floor(video.currentTime);
+    const oldSession = state.sessionId;
+    state.restarting = true;
+    state.sessionId = null;
+    if (state.hls) { try { state.hls.destroy(); } catch (e) { /* already gone */ } state.hls = null; }
+    api("/api/play/stop", {session: oldSession}).catch(() => {});
+    plStartTranscode(state, target).finally(() => { state.restarting = false; });
+  }, 300);
+}
+
+function closePlayer() {
+  plTeardown();
+  const video = $("plVideo");
+  video.pause(); video.removeAttribute("src"); video.load();
+  plSetStatus("");
   $("player").hidden = true;
 }
 /* ---------------- postprocess （归类预览） ---------------- */

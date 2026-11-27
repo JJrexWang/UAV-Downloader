@@ -1,0 +1,3 @@
+hls.min.js is hls.js 1.5.18 (https://github.com/video-dev/hls.js),
+licensed under the Apache License, Version 2.0.
+Vendored for LAN-only playback; no CDN is contacted at runtime.

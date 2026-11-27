@@ -2,9 +2,11 @@
 # Pass URL(s); videos are downloaded to /downloads without a GUI.
 FROM python:3.12-slim
 
-# ffmpeg = TS->MP4 remux; ca-certificates = TLS. Slim + cleaned apt lists.
+# ffmpeg = TS->MP4 remux + on-demand HLS transcoding; VAAPI drivers let
+# ffmpeg use Intel QuickSync when /dev/dri is passed through at runtime.
+# ca-certificates = TLS. Slim + cleaned apt lists.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg ca-certificates \
+        ffmpeg ca-certificates intel-media-va-driver i965-va-driver \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -2,14 +2,21 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+from pathlib import Path
 import re
 import threading
-from urllib.parse import parse_qs, urlsplit
+import time
+from urllib.parse import parse_qs, quote, urlsplit
 
 from uav_downloader.core.storage import StorageWriteError
 from . import actress, auth, backfill, library, metadata, organize
-from . import postprocess, searchsvc, thumbs
+from . import postprocess, probe, searchsvc, thumbs, transcode
 from .ui import HTML, CSS, JS
+
+try:
+    HLS_JS = Path(__file__).with_name('hls.min.js').read_bytes()
+except OSError:
+    HLS_JS = None  # UI falls back to a native playback attempt.
 
 
 def _id_list(data, required=True):
@@ -31,7 +38,7 @@ def _id_list(data, required=True):
 MAX_BODY = 256 * 1024
 DEFAULT_SETTINGS = {'auto_rename': True, 'file_mode': 'preview', 'lang': 'zh-Hans'}
 PAGE_CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; "
-            "connect-src 'self'; img-src 'self' https: data:; media-src 'self'; "
+            "connect-src 'self'; img-src 'self' https: data:; media-src 'self' blob:; "
             "frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'")
 VIDEO_TYPES = {'.mp4': 'video/mp4', '.mkv': 'video/x-matroska',
                '.avi': 'video/x-msvideo', '.mov': 'video/quicktime',
@@ -41,7 +48,8 @@ IMAGE_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
                '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif'}
 QUERY_GET_PATHS = {'/api/search', '/api/library', '/api/library/tree',
                    '/api/library/actresses', '/api/settings',
-                   '/api/stream', '/api/cover', '/api/thumb'}
+                   '/api/stream', '/api/cover', '/api/thumb', '/api/play/info'}
+HLS_FILE_RE = re.compile(r'^(index\.m3u8|seg\d+\.ts)$')
 # While an account still has must_change set, only these paths stay usable:
 # the forced password-change flow and its escape hatch.
 MUST_CHANGE_ALLOWED = {'/api/me', '/api/change-password', '/api/logout'}
@@ -140,6 +148,10 @@ class BoundedServer(ThreadingHTTPServer):
 
 def make_server(host, port, queue, allowed_hosts=None):
     auth.ensure_bootstrap()  # First run: create the default admin account.
+    try:
+        transcode.purge_all()  # Transcode sessions never survive a restart.
+    except Exception:
+        pass
     settings_path = os.path.join(
         os.environ.get('UAV_WEB_STATE_DIR', '/state'), 'settings.json')
 
@@ -517,8 +529,118 @@ def make_server(host, port, queue, allowed_hosts=None):
                                  VIDEO_TYPES.get(extension, 'application/octet-stream'),
                                  allow_range=True)
 
+        def _handle_play_info(self, params):
+            rel = params.get('rel', [''])[0]
+            if not library.resolve_stream(rel):
+                self._send(404, {'error': 'Not found'})
+                return
+            result = probe.probe(rel)
+            result['mode'] = 'direct' if result.get('direct') else 'transcode'
+            self._send(200, result)
+
+        def _handle_hls(self, path, params):
+            parts = path[len('/api/hls/'):].split('/')
+            if len(parts) != 2:
+                self._send(404, {'error': 'Not found'})
+                return
+            session_id, filename = parts
+            session = transcode.get(session_id)
+            if (session is None or not HLS_FILE_RE.match(filename)):
+                self._send(404, {'error': 'Not found'})
+                return
+            transcode.touch(session_id)
+            target = session['dir'] / filename
+            if filename == 'index.m3u8':
+                # ffmpeg writes the playlist shortly after spawn; wait a
+                # little instead of making the player retry on a 404.
+                deadline = time.monotonic() + 5
+                while not target.is_file() and time.monotonic() < deadline:
+                    time.sleep(0.1)
+            if not target.is_file():
+                self._send(404, {'error': 'Not found'})
+                return
+            try:
+                payload = target.read_bytes()
+            except OSError:
+                self._send(404, {'error': 'Not found'})
+                return
+            if filename == 'index.m3u8':
+                # hls.js and Safari resolve segment URLs relative to the
+                # playlist URL and drop its query string, so bake the
+                # media token into the segment lines themselves.
+                token = params.get('t', [''])[0]
+                if token:
+                    suffix = '?t=' + quote(token, safe='')
+                    lines = payload.decode('utf-8', 'replace').splitlines()
+                    payload = ('\n'.join(
+                        line + suffix if line and not line.startswith('#')
+                        and line.endswith('.ts') else line
+                        for line in lines) + '\n').encode('utf-8')
+                content_type = 'application/vnd.apple.mpegurl'
+            else:
+                content_type = 'video/mp2t'
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(payload)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def _do_play_start(self, data):
+            if (not set(data) <= {'rel', 't'}
+                    or not isinstance(data.get('rel'), str)
+                    or not data.get('rel')):
+                self._send(400, {'error': 'Expected rel and optional t'})
+                return
+            offset = data.get('t', 0)
+            if (isinstance(offset, bool)
+                    or not isinstance(offset, (int, float)) or offset < 0):
+                self._send(400, {'error': 't must be a non-negative number'})
+                return
+            rel = data['rel']
+            if not library.resolve_stream(rel):
+                self._send(404, {'error': 'Not found'})
+                return
+            try:
+                session = transcode.start(rel, float(offset))
+            except ValueError as exc:
+                if str(exc) == 'busy':
+                    self._send(503, {'error': '转码繁忙，请稍后再试'})
+                    return
+                if str(exc) == 'not_found':
+                    self._send(404, {'error': 'Not found'})
+                    return
+                raise
+            info = probe.probe(rel)
+            self._send(200, {
+                'session': session['id'],
+                'playlist': f"/api/hls/{session['id']}/index.m3u8",
+                'offset': session['offset'],
+                'encoder': session['encoder'],
+                'duration': info.get('duration', 0.0)})
+
+        def _do_play_stop(self, data):
+            if set(data) != {'session'} or not isinstance(data['session'], str):
+                self._send(400, {'error': 'Expected only session'})
+                return
+            transcode.stop(data['session'])
+            self._send(200, {'ok': True})
+
         def do_GET(self):
             path = self.path.split('?', 1)[0].split('#', 1)[0]
+            if path.startswith('/api/hls/'):
+                if not self._guard(allow_query=True):
+                    return
+                try:
+                    params = parse_qs(urlsplit(self.path).query)
+                except ValueError:
+                    self._send(400, {'error': 'Invalid query string'})
+                    return
+                if self._auth_media(params):
+                    self._handle_hls(path, params)
+                return
             if path in QUERY_GET_PATHS:
                 if not self._guard(allow_query=True):
                     return
@@ -533,6 +655,9 @@ def make_server(host, port, queue, allowed_hosts=None):
                 elif path == '/api/thumb':
                     if self._auth_media(params):
                         self._handle_thumb(params)
+                elif path == '/api/play/info':
+                    if self._auth_media(params):
+                        self._handle_play_info(params)
                 elif path == '/api/library':
                     if self._auth():
                         self._handle_library()
@@ -553,6 +678,9 @@ def make_server(host, port, queue, allowed_hosts=None):
             static = {'/': (HTML, 'text/html; charset=utf-8'),
                       '/app.css': (CSS, 'text/css; charset=utf-8'),
                       '/app.js': (JS, 'text/javascript; charset=utf-8')}
+            if HLS_JS is not None:
+                static['/hls.min.js'] = (HLS_JS,
+                                         'application/javascript; charset=utf-8')
             if self.path in static:
                 if self.path == '/':
                     self._send(200, HTML, 'text/html; charset=utf-8', csp=PAGE_CSP)
@@ -611,6 +739,12 @@ def make_server(host, port, queue, allowed_hosts=None):
                     return
                 if self.path == '/api/change-password':
                     self._do_change_password(data)
+                    return
+                if self.path == '/api/play/start':
+                    self._do_play_start(data)
+                    return
+                if self.path == '/api/play/stop':
+                    self._do_play_stop(data)
                     return
                 if self.path == '/api/users':
                     if self._require_admin():
